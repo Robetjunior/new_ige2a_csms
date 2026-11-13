@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IGE2A CSMS — Central de Monitoramento</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <h1>IGE2A CSMS</h1>
+        <span class="subtitle">Central de Monitoramento OCPP 1.6J</span>
+      </div>
+      <div class="topbar-actions">
+        <span id="stream-state" class="badge badge-off" title="Estado do canal de tempo real">desconectado</span>
+        <input id="api-key" type="password" autocomplete="off" placeholder="CSMS_API_KEY (somente se exigido)" />
+        <button id="btn-reconnect" class="btn">Reconectar</button>
+      </div>
+    </header>
+
+    <section class="kpis" id="kpis"></section>
+
+    <main class="grid">
+      <section class="panel">
+        <header class="panel-head">
+          <h2>Carregadores</h2>
+          <span class="hint" id="chargers-count">0</span>
+        </header>
+        <div id="chargers" class="chargers"></div>
+      </section>
+
+      <section class="panel">
+        <header class="panel-head">
+          <h2 id="detail-title">Diagnóstico</h2>
+          <span class="hint" id="detail-sub"></span>
+        </header>
+        <div id="detail" class="detail">
+          <p class="empty">Selecione um carregador para ver o diagnóstico, as últimas mensagens e enviar comandos.</p>
+        </div>
+      </section>
+    </main>
+
+    <section class="panel terminal-panel">
+      <header class="panel-head">
+        <h2>Terminal OCPP ao vivo</h2>
+        <div class="panel-actions">
+          <label class="chk"><input type="checkbox" id="pause" /> pausar</label>
+          <label class="chk"><input type="checkbox" id="autoscroll" checked /> auto-scroll</label>
+          <span class="hint" id="terminal-count">0 mensagens</span>
+          <button id="clear-log" class="btn">limpar</button>
+          <button id="export-json" class="btn">exportar JSON</button>
+          <button id="export-csv" class="btn">exportar CSV</button>
+        </div>
+      </header>
+      <div class="filters" id="filters">
+        <select id="f-charger"><option value="">todos os carregadores</option></select>
+        <select id="f-direction">
+          <option value="">ambas as direções</option>
+          <option value="received">⬇ recebidas</option>
+          <option value="sent">⬆ enviadas</option>
+        </select>
+        <select id="f-type">
+          <option value="">todos os tipos</option>
+          <option>CALL</option>
+          <option>CALLRESULT</option>
+          <option>CALLERROR</option>
+          <option>UNKNOWN</option>
+        </select>
+        <input id="f-action" placeholder="action (ex.: Heartbeat)" />
+        <input id="f-search" placeholder="buscar em id/uniqueId/action/payload" />
+        <label class="chk"><input type="checkbox" id="f-errors" /> somente erros</label>
+      </div>
+      <div id="terminal" class="terminal"></div>
+    </section>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
