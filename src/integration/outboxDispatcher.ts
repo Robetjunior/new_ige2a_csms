@@ -34,6 +34,19 @@ export interface EventPusher {
   push(event: IntegrationEvent): Promise<PushResult>;
 }
 
+/**
+ * Gate global de envio (F6). Quando presente, o dispatcher consulta antes de
+ * tentar e reporta o desfecho de cada envio. Ver `CircuitBreaker`.
+ */
+export interface CircuitGate {
+  /** Checa (sem consumir sonda) se vale reivindicar o lote neste ciclo. */
+  canAttempt(): boolean;
+  /** Checa e consome uma sonda do `half_open` antes de enviar um item. */
+  allowAttempt(): boolean;
+  onSuccess(): void;
+  onFailure(): void;
+}
+
 export interface OutboxDispatcherOptions {
   store: OutboxStore;
   client: EventPusher;
@@ -42,6 +55,8 @@ export interface OutboxDispatcherOptions {
   maxAttempts: number;
   backoffBaseMs: number;
   backoffMaxMs: number;
+  /** Circuit breaker opcional (F6): evita avalanche quando o ANTIGO cai. */
+  breaker?: CircuitGate;
   log?: (msg: string, meta?: unknown) => void;
   /** Relogio injetavel (backoff deterministico em teste). */
   now?: () => number;
@@ -79,16 +94,32 @@ export class OutboxDispatcher {
   async drainOnce(): Promise<void> {
     if (this.running) return;
     this.running = true;
-    const { store, client, log } = this.options;
+    const { store, client, breaker, log } = this.options;
     try {
+      // F6: com o circuito aberto, nem reivindicamos o lote — os eventos seguem
+      // `pending` no outbox e sao reenviados no proximo ciclo apos o cooldown.
+      // A checagem aqui NAO consome a sonda do `half_open` (isso fica por item,
+      // em `allowAttempt`), senao um lote vazio gastaria a unica sonda.
+      if (breaker && !breaker.canAttempt()) {
+        log?.('[integration] circuito aberto; reenvio de telemetria adiado');
+        return;
+      }
       const batch = await store.claimBatch(this.options.batchSize);
       for (const item of batch) {
+        // O circuito pode abrir no meio do lote (falha consecutiva): interrompe
+        // o restante e devolve a fila para o proximo ciclo.
+        if (breaker && !breaker.allowAttempt()) {
+          log?.('[integration] circuito aberto durante o lote; restante adiado');
+          return;
+        }
         const event = item.payload as IntegrationEvent;
         const result = await client.push(event);
         if (result.ok) {
+          breaker?.onSuccess();
           await store.markSent(item.id);
           continue;
         }
+        breaker?.onFailure();
         const attempts = item.attempts + 1;
         const terminal = attempts >= this.options.maxAttempts;
         const nextAt = this.nextAttemptIso(attempts);

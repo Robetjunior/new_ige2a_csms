@@ -53,6 +53,10 @@ export interface AppConfig {
     readonly pushMaxAttempts: number;
     readonly pushBackoffBaseMs: number;
     readonly pushBackoffMaxMs: number;
+    /** F6: falhas consecutivas que abrem o circuit breaker do push. */
+    readonly pushCircuitFailureThreshold: number;
+    /** F6: tempo (ms) com o circuito aberto antes de sondar o ANTIGO. */
+    readonly pushCircuitOpenMs: number;
   };
 
   readonly ocpp: {
@@ -127,6 +131,8 @@ export function loadConfig(): AppConfig {
       pushMaxAttempts: Math.max(1, readNumber('INTEGRATION_PUSH_MAX_ATTEMPTS', 8)),
       pushBackoffBaseMs: Math.max(100, readNumber('INTEGRATION_PUSH_BACKOFF_BASE_MS', 2000)),
       pushBackoffMaxMs: Math.max(1000, readNumber('INTEGRATION_PUSH_BACKOFF_MAX_MS', 300_000)),
+      pushCircuitFailureThreshold: Math.max(1, readNumber('INTEGRATION_PUSH_CIRCUIT_FAILURE_THRESHOLD', 5)),
+      pushCircuitOpenMs: Math.max(1000, readNumber('INTEGRATION_PUSH_CIRCUIT_OPEN_MS', 30_000)),
     }),
 
     ocpp: Object.freeze({

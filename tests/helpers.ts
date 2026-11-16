@@ -21,6 +21,8 @@ export function makeTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       pushMaxAttempts: 8,
       pushBackoffBaseMs: 2000,
       pushBackoffMaxMs: 300_000,
+      pushCircuitFailureThreshold: 5,
+      pushCircuitOpenMs: 30_000,
     }),
     ocpp: Object.freeze({
       lenientProtocolFallback: true,

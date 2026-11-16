@@ -357,7 +357,8 @@ export async function createApp(config: AppConfig = loadConfig(), deps: AppDepen
       components.reconnectionWatcher.stop();
       components.fleetStateSyncer.stop();
       components.availabilityProbe.stop();
-      integration.stop();
+      // Integracao: para o push/produtor e drena a serie temporal (F4).
+      await integration.stop();
       components.wsServer.closeAll();
       monitorWs.closeAll();
       // Drena a fila de persistencia antes de encerrar (spec §6).

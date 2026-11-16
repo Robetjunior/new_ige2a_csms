@@ -29,6 +29,17 @@ export interface SimulatorOptions {
   triggerMessageSupport?: boolean;
   /** Mensagens aceitas, mas deliberadamente nao transmitidas (teste de timeout). */
   ignoreTriggeredMessages?: string[];
+  /**
+   * Simula o ciclo completo de recarga ao receber `RemoteStartTransaction`:
+   * `StatusNotification(Preparing->Charging)` + `StartTransaction` + fluxo
+   * periodico de `MeterValues`; e `StopTransaction` em `RemoteStopTransaction`.
+   * Se false, apenas responde `Accepted` ao comando (default: true).
+   */
+  simulateCharging?: boolean;
+  /** Intervalo entre amostras de MeterValues durante a recarga (default: 5000ms). */
+  meterIntervalMs?: number;
+  /** Potencia ativa reportada nas amostras, em W (default: 7000). */
+  meterPowerW?: number;
   vendor?: string;
   model?: string;
   firmwareVersion?: string;
@@ -45,6 +56,16 @@ export class OcppSimulator {
   private hasConnected = false;
   private intentionalStop = false;
   private bootUniqueId: string | null = null;
+  /** Timer do fluxo periodico de MeterValues durante a recarga. */
+  private meterTimer: ReturnType<typeof setInterval> | null = null;
+  /** Transacao ativa atribuida pelo CSMS (apos o CALLRESULT de StartTransaction). */
+  private activeTransactionId: number | null = null;
+  /** Conector em uso pela transacao ativa. */
+  private activeConnectorId: number | null = null;
+  /** uniqueId do CALL StartTransaction aguardando CALLRESULT. */
+  private startTransactionCallId: string | null = null;
+  /** Energia acumulada reportada (Wh), cresce conforme meterPowerW. */
+  private energyWh = 0;
   heartbeatIntervalMs: number;
 
   constructor(options: SimulatorOptions) {
@@ -59,6 +80,9 @@ export class OcppSimulator {
       maxReconnectDelayMs: options.maxReconnectDelayMs ?? 30_000,
       triggerMessageSupport: options.triggerMessageSupport ?? true,
       ignoreTriggeredMessages: options.ignoreTriggeredMessages ?? [],
+      simulateCharging: options.simulateCharging ?? true,
+      meterIntervalMs: options.meterIntervalMs ?? 5000,
+      meterPowerW: options.meterPowerW ?? 7000,
       vendor: options.vendor ?? 'IGE2A',
       model: options.model ?? 'TEISON-7KW',
       firmwareVersion: options.firmwareVersion ?? '1.0.0-sim',
@@ -107,6 +131,11 @@ export class OcppSimulator {
         this.reconnectAttempts = 0;
         this.bootUniqueId = this.sendBoot();
         if (!this.opts.respectServerInterval) this.scheduleHeartbeat(this.opts.heartbeatIntervalMs);
+        // Reconexao durante recarga ativa: reprojeta status e retoma o fluxo de MeterValues.
+        if (this.activeTransactionId !== null) {
+          this.sendStatusNotification(this.activeConnectorId ?? 1, 'Charging');
+          this.startMeterStream();
+        }
         resolve();
       });
       ws.on('message', (data) => this.onMessage(data.toString()));
@@ -118,6 +147,7 @@ export class OcppSimulator {
         this.ws = null;
         this.bootUniqueId = null;
         this.clearHeartbeat();
+        this.stopMeterStream();
         if (!this.intentionalStop && this.opts.autoReconnect) this.scheduleReconnect(code, reason.toString());
       });
     });
@@ -180,16 +210,39 @@ export class OcppSimulator {
     const frame = parsed.frame;
 
     if (frame.messageTypeId === 3) {
-      // Resposta a um CALL nosso (BootNotification/Heartbeat).
-      const result = frame.payload as { interval?: number } | null;
+      // Resposta a um CALL nosso (BootNotification/Heartbeat/StartTransaction/StopTransaction).
+      const result = frame.payload as Record<string, unknown> | null;
       if (frame.uniqueId === this.bootUniqueId) {
         this.bootUniqueId = null;
         if (result && (result as { status?: string }).status === 'Accepted') {
           this.sendStatusNotification(1, 'Available');
         }
       }
+      if (frame.uniqueId === this.startTransactionCallId) {
+        this.startTransactionCallId = null;
+        const transactionId = result?.transactionId;
+        // Ignora CALLRESULT tardio se a sessao ja foi encerrada (conector liberado).
+        if (typeof transactionId === 'number' && this.activeConnectorId !== null) {
+          this.activeTransactionId = transactionId;
+          // eslint-disable-next-line no-console
+          console.log(
+            `[SIM] recarga iniciada: transactionId=${transactionId} conector=${this.activeConnectorId ?? 1}`,
+          );
+          this.startMeterStream();
+        } else if (typeof transactionId === 'number') {
+          this.call('StopTransaction', {
+            transactionId,
+            meterStop: 0,
+            timestamp: new Date().toISOString(),
+            reason: 'Other',
+          });
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn(`[SIM] StartTransaction nao retornou transactionId: ${JSON.stringify(result)}`);
+        }
+      }
       if (result && typeof result.interval === 'number' && result.interval > 0 && this.heartbeatTimer === null) {
-        this.scheduleHeartbeat(result.interval * 1000);
+        this.scheduleHeartbeat((result.interval as number) * 1000);
       }
       return;
     }
@@ -205,8 +258,18 @@ export class OcppSimulator {
 
   private handleCsmsCall(action: string, payload: unknown): unknown {
     switch (action) {
-      case 'RemoteStartTransaction':
+      case 'RemoteStartTransaction': {
+        if (!this.opts.simulateCharging) return { status: 'Accepted' };
+        const request = this.asRecord(payload);
+        const connectorId = typeof request.connectorId === 'number' ? request.connectorId : 1;
+        const idTag =
+          typeof request.idTag === 'string' && request.idTag.length > 0 ? request.idTag : this.opts.chargePointId;
+        queueMicrotask(() => this.beginChargeSession(connectorId, idTag));
+        return { status: 'Accepted' };
+      }
       case 'RemoteStopTransaction':
+        if (this.opts.simulateCharging) queueMicrotask(() => this.endChargeSession('Remote'));
+        return { status: 'Accepted' };
       case 'Reset':
       case 'UnlockConnector':
       case 'ChangeAvailability':
@@ -274,6 +337,82 @@ export class OcppSimulator {
     });
   }
 
+  /** Inicia a recarga: Preparing -> Charging -> StartTransaction. */
+  private beginChargeSession(connectorId: number, idTag: string): void {
+    if (!this.isConnected || this.activeTransactionId !== null || this.startTransactionCallId !== null) return;
+    this.activeConnectorId = connectorId;
+    this.energyWh = 0;
+    // eslint-disable-next-line no-console
+    console.log(`[SIM] RemoteStart aceito; iniciando recarga no conector ${connectorId}`);
+    this.sendStatusNotification(connectorId, 'Preparing');
+    this.sendStatusNotification(connectorId, 'Charging');
+    this.startTransactionCallId = this.call('StartTransaction', {
+      connectorId,
+      idTag,
+      meterStart: 0,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /** Encerra a recarga: StopTransaction + StatusNotification(Available). */
+  private endChargeSession(reason: string): void {
+    const connectorId = this.activeConnectorId ?? 1;
+    this.stopMeterStream();
+    if (this.activeTransactionId !== null) {
+      this.call('StopTransaction', {
+        transactionId: this.activeTransactionId,
+        meterStop: Math.round(this.energyWh),
+        timestamp: new Date().toISOString(),
+        reason,
+      });
+      // eslint-disable-next-line no-console
+      console.log(
+        `[SIM] recarga encerrada: transactionId=${this.activeTransactionId} energia=${Math.round(this.energyWh)}Wh motivo=${reason}`,
+      );
+    }
+    this.activeTransactionId = null;
+    this.activeConnectorId = null;
+    this.sendStatusNotification(connectorId, 'Available');
+  }
+
+  /** Inicia o envio periodico de MeterValues enquanto houver transacao ativa. */
+  private startMeterStream(): void {
+    if (!this.isConnected || this.activeTransactionId === null) return;
+    this.stopMeterStream();
+    this.sendChargingMeterValues();
+    this.meterTimer = setInterval(() => this.sendChargingMeterValues(), this.opts.meterIntervalMs);
+  }
+
+  private stopMeterStream(): void {
+    if (this.meterTimer) clearInterval(this.meterTimer);
+    this.meterTimer = null;
+  }
+
+  private sendChargingMeterValues(): void {
+    if (!this.isConnected || this.activeTransactionId === null) return;
+    this.energyWh += (this.opts.meterPowerW * this.opts.meterIntervalMs) / 3_600_000;
+    this.call('MeterValues', {
+      connectorId: this.activeConnectorId ?? 1,
+      transactionId: this.activeTransactionId,
+      meterValue: [
+        {
+          timestamp: new Date().toISOString(),
+          sampledValue: [
+            { value: String(Math.round(this.energyWh)), measurand: 'Energy.Active.Import.Register', unit: 'Wh' },
+            { value: String(this.opts.meterPowerW), measurand: 'Power.Active.Import', unit: 'W' },
+            { value: '28.5', measurand: 'Temperature', unit: 'Celsius' },
+          ],
+        },
+      ],
+    });
+  }
+
+  private asRecord(payload: unknown): Record<string, unknown> {
+    return payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {};
+  }
+
   /** Envia um frame bruto invalido (teste de robustez/parse). */
   sendRaw(raw: string): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(raw);
@@ -299,6 +438,7 @@ export class OcppSimulator {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.clearHeartbeat();
+    this.stopMeterStream();
     const ws = this.ws;
     this.ws = null;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {

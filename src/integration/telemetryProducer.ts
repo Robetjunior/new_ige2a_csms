@@ -27,6 +27,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { IntegrationEvent, IntegrationEventType, IntegrationMeterSample } from './types';
+import type { MeterSampleSink } from './meterSampleRepository';
 
 /** Superficie minima do estado dos carregadores consumida pelo produtor. */
 export interface TelemetryChargers {
@@ -64,6 +65,12 @@ export interface TelemetryProducerDeps {
   messages: TelemetryMessages;
   sessions: TelemetrySessionLookup;
   outbox: TelemetryOutbox;
+  /**
+   * Sink opcional da serie temporal (F4). Quando presente, cada `MeterValues`
+   * normalizado e persistido em `charge_meter_sample` — inclusive quando nao ha
+   * sessao de negocio correlacionada (a serie e por carregador/conector).
+   */
+  samples?: MeterSampleSink;
   log?: (msg: string, meta?: unknown) => void;
   /** Relogio injetavel para testes deterministicos. */
   now?: () => number;
@@ -310,10 +317,23 @@ export class TelemetryProducer {
   private fireMeterSampled(entry: TelemetryMessage, payload: Record<string, unknown>): void {
     const connectorId = asInteger(payload.connectorId);
     if (connectorId === null) return;
-    const active = this.active.get(this.key(entry.chargePointId, connectorId));
-    if (!active?.integrationSessionId) return;
     const samples = normalizeMeterValue(payload.meterValue);
     if (samples.length === 0) return;
+    const active = this.active.get(this.key(entry.chargePointId, connectorId));
+    // F4: a serie temporal e por carregador/conector e independe da sessao de
+    // negocio; persistir SEMPRE (a energia e a verdade do NOVO, secao 7.2).
+    try {
+      this.deps.samples?.record({
+        chargePointId: entry.chargePointId,
+        connectorId,
+        integrationSessionId: active?.integrationSessionId ?? null,
+        samples,
+      });
+    } catch (err) {
+      this.deps.log?.(`[integration] falha ao persistir serie de ${entry.chargePointId}/${connectorId}`, err);
+    }
+    // O envelope de telemetria so e emitido quando ha sessao correlacionada.
+    if (!active?.integrationSessionId) return;
     void this.enqueue(
       this.buildEvent('meter.sampled', {
         integrationSessionId: active.integrationSessionId,

@@ -6,6 +6,7 @@ import {
   type OutboxDispatcherOptions,
   type OutboxStore,
 } from '../src/integration/outboxDispatcher';
+import { CircuitBreaker } from '../src/integration/circuitBreaker';
 import type { IntegrationEvent } from '../src/integration/types';
 
 interface ClaimedItem {
@@ -185,4 +186,62 @@ test('start e stop sao idempotentes', () => {
     dispatcher.stop();
     dispatcher.stop();
   });
+});
+
+// --- F6: circuit breaker -----------------------------------------------------
+
+test('circuito aberto adia o ciclo sem reivindicar o lote', async () => {
+  let claims = 0;
+  const store: OutboxStore = {
+    async claimBatch() {
+      claims += 1;
+      return [];
+    },
+    async markSent() {
+      /* noop */
+    },
+    async markFailed() {
+      /* noop */
+    },
+  };
+  const breaker = new CircuitBreaker({ failureThreshold: 1, openMs: 60_000 });
+  breaker.onFailure(); // abre o circuito (ANTIGO indisponivel)
+  const dispatcher = makeDispatcher(store, clientFail(), { breaker });
+
+  await dispatcher.drainOnce();
+
+  assert.equal(claims, 0, 'nada e reivindicado enquanto o circuito esta aberto');
+});
+
+test('falha consecutiva abre o circuito e interrompe o restante do lote', async () => {
+  const { store, sent, failed } = fakeStore([
+    claimed('e1', 0, 'o1'),
+    claimed('e2', 0, 'o2'),
+    claimed('e3', 0, 'o3'),
+  ]);
+  const breaker = new CircuitBreaker({ failureThreshold: 1, openMs: 60_000 });
+  const dispatcher = makeDispatcher(store, clientFail(), { breaker });
+
+  await dispatcher.drainOnce();
+
+  assert.equal(sent.length, 0);
+  assert.equal(failed.length, 1, 'apenas o primeiro item do lote foi tentado');
+  assert.equal(breaker.getState(), 'open');
+});
+
+test('apos o cooldown o circuito sonda e volta a enviar', async () => {
+  let now = 0;
+  const breaker = new CircuitBreaker({ failureThreshold: 1, openMs: 1_000, now: () => now });
+
+  const failing = fakeStore([claimed('e1', 0, 'o1')]);
+  await makeDispatcher(failing.store, clientFail(), { breaker }).drainOnce();
+  assert.equal(breaker.getState(), 'open');
+
+  now += 1_000; // cooldown vencido
+
+  const succeeding = fakeStore([claimed('e2', 0, 'o2')]);
+  await makeDispatcher(succeeding.store, clientOk(), { breaker }).drainOnce();
+
+  assert.deepEqual(succeeding.sent, ['o2']);
+  assert.equal(breaker.getState(), 'closed');
 });

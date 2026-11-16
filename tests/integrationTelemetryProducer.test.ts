@@ -5,9 +5,11 @@ import {
   TelemetryProducer,
   type TelemetryMessage,
   type TelemetryOutbox,
+  type TelemetryProducerDeps,
   type TelemetrySessionLookup,
 } from '../src/integration/telemetryProducer';
 import type { IntegrationEvent, IntegrationMeterSample } from '../src/integration/types';
+import type { MeterSampleInput } from '../src/integration/meterSampleRepository';
 
 /**
  * Emissor FALSO de mensagens OCPP com a mesma superficie de
@@ -40,7 +42,10 @@ function fakeMessages() {
   };
 }
 
-function setup(sessionMap = new Map<string, string>([['CP-1|1', 'sess-1']])) {
+function setup(
+  sessionMap = new Map<string, string>([['CP-1|1', 'sess-1']]),
+  samples?: TelemetryProducerDeps['samples'],
+) {
   const chargers = new ChargerStateService();
   const msgs = fakeMessages();
   const events: IntegrationEvent[] = [];
@@ -59,6 +64,7 @@ function setup(sessionMap = new Map<string, string>([['CP-1|1', 'sess-1']])) {
     messages: msgs.messages,
     sessions,
     outbox,
+    samples,
     log: () => undefined,
   });
   return { chargers, msgs, events, producer };
@@ -175,6 +181,71 @@ test('MeterValues fora de uma sessao correlacionada nao emite', async () => {
   await tick();
 
   assert.equal(ctx.events.length, 0);
+  ctx.producer.stop();
+});
+
+// --- F4: serie temporal ------------------------------------------------------
+
+test('MeterValues com sessao correlacionada persiste a serie e emite o envelope', async () => {
+  const recorded: MeterSampleInput[] = [];
+  const ctx = setup(undefined, {
+    record(input) {
+      recorded.push(input);
+    },
+  });
+  ctx.producer.start();
+  const txId = await openSession(ctx);
+
+  ctx.msgs.emit({
+    chargePointId: 'CP-1',
+    action: 'MeterValues',
+    payload: {
+      connectorId: 1,
+      transactionId: txId,
+      meterValue: [
+        {
+          timestamp: '2026-01-01T00:00:02.000Z',
+          sampledValue: [{ value: '1200', measurand: 'Energy.Active.Import.Register', unit: 'Wh' }],
+        },
+      ],
+    },
+  });
+  await tick();
+
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].chargePointId, 'CP-1');
+  assert.equal(recorded[0].connectorId, 1);
+  assert.equal(recorded[0].integrationSessionId, 'sess-1');
+  assert.equal(recorded[0].samples.length, 1);
+  assert.equal(recorded[0].samples[0]?.measurand, 'Energy.Active.Import.Register');
+  assert.equal(ctx.events.filter((event) => event.eventType === 'meter.sampled').length, 1);
+
+  ctx.producer.stop();
+});
+
+test('MeterValues sem sessao correlacionada persiste a serie, mas nao emite envelope', async () => {
+  const recorded: MeterSampleInput[] = [];
+  const ctx = setup(new Map(), {
+    record(input) {
+      recorded.push(input);
+    },
+  });
+  ctx.producer.start();
+
+  ctx.msgs.emit({
+    chargePointId: 'CP-1',
+    action: 'MeterValues',
+    payload: {
+      connectorId: 1,
+      meterValue: [{ timestamp: '2026-01-01T00:00:02.000Z', sampledValue: [{ value: '1200' }] }],
+    },
+  });
+  await tick();
+
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].integrationSessionId, null);
+  assert.equal(ctx.events.length, 0);
+
   ctx.producer.stop();
 });
 

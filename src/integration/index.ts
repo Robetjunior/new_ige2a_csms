@@ -4,7 +4,8 @@
  * componentes das fases entregues:
  *   - F1: repositorio do inbox + correlacionador de sessao;
  *   - F2: repositorio consumido pelas rotas HTTP (`routes.ts`);
- *   - F3: outbox + produtor de telemetria + dispatcher de push (HMAC).
+ *   - F3: outbox + produtor de telemetria + dispatcher de push (HMAC);
+ *   - F4: serie temporal de `MeterValues` (`charge_meter_sample`) + metricas.
  *
  * Caracteristicas:
  *   - sem `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` o modulo fica DESABILITADO
@@ -22,9 +23,11 @@ import type { AnySupabaseClient } from '../persistence/supabaseBatchWriter';
 import { IntegrationInboxRepository } from './inboxRepository';
 import { IntegrationOutboxRepository } from './outboxRepository';
 import { IntegrationPushClient } from './pushClient';
+import { MeterSampleRepository } from './meterSampleRepository';
 import { OutboxDispatcher } from './outboxDispatcher';
 import { TelemetryProducer, type TelemetryMessages } from './telemetryProducer';
 import { SessionCorrelator, type SessionCorrelatorChargers } from './sessionCorrelator';
+import { CircuitBreaker } from './circuitBreaker';
 
 export interface IntegrationModuleDeps {
   config: AppConfig;
@@ -48,12 +51,17 @@ export interface IntegrationModule {
   readonly outbox: IntegrationOutboxRepository | null;
   /** Produtor de telemetria (F3). Presente sempre que o modulo esta habilitado. */
   readonly producer: TelemetryProducer | null;
+  /** Serie temporal de `MeterValues` (F4). Presente sempre que o modulo esta habilitado. */
+  readonly samples: MeterSampleRepository | null;
   /** Dispatcher de push (F3). Nulo quando o push nao esta configurado. */
   readonly dispatcher: OutboxDispatcher | null;
+  /** Circuit breaker do push (F6). Nulo quando o push nao esta configurado. */
+  readonly breaker: CircuitBreaker | null;
   /** Indica se o push para o ANTIGO esta ativo. */
   readonly pushEnabled: boolean;
   start(): void;
-  stop(): void;
+  /** Para o modulo e drena a serie temporal (F4) antes de encerrar. */
+  stop(): Promise<void>;
 }
 
 function createDisabled(): IntegrationModule {
@@ -63,12 +71,14 @@ function createDisabled(): IntegrationModule {
     correlator: null,
     outbox: null,
     producer: null,
+    samples: null,
     dispatcher: null,
+    breaker: null,
     pushEnabled: false,
     start() {
       /* noop */
     },
-    stop() {
+    async stop() {
       /* noop */
     },
   };
@@ -106,21 +116,37 @@ export function createIntegrationModule(deps: IntegrationModuleDeps): Integratio
   const repository = new IntegrationInboxRepository(client, { schema: persistence.supabaseSchema, log });
   const correlator = new SessionCorrelator({ chargers: deps.chargers, messages: deps.messages, repository, log });
   const outbox = new IntegrationOutboxRepository(client, { schema: persistence.supabaseSchema, log });
+  // F4: a serie reutiliza os limites de fila/flush da persistencia (risco R6:
+  // writer em lote com fila limitada, mesmo padrao ja existente).
+  const samples = new MeterSampleRepository(client, {
+    schema: persistence.supabaseSchema,
+    batchSize: persistence.logBatchSize,
+    flushIntervalMs: persistence.logFlushIntervalMs,
+    maxQueue: persistence.logMaxQueue,
+    log,
+  });
   const producer = new TelemetryProducer({
     chargers: deps.chargers,
     messages: deps.messages,
     sessions: repository,
     outbox,
+    samples,
     log,
   });
 
   let dispatcher: OutboxDispatcher | null = null;
+  let breaker: CircuitBreaker | null = null;
   let pushEnabled = false;
   if (integration.pushEnabled && integration.targetUrl.length > 0 && integration.hmacSecret.length > 0) {
     const pushClient = new IntegrationPushClient({
       targetUrl: integration.targetUrl,
       hmacSecret: integration.hmacSecret,
       timeoutMs: integration.pushTimeoutMs,
+    });
+    // F6: gate global de envio (abre apos N falhas; sonda apos o cooldown).
+    breaker = new CircuitBreaker({
+      failureThreshold: integration.pushCircuitFailureThreshold,
+      openMs: integration.pushCircuitOpenMs,
     });
     dispatcher = new OutboxDispatcher({
       store: outbox,
@@ -130,6 +156,7 @@ export function createIntegrationModule(deps: IntegrationModuleDeps): Integratio
       maxAttempts: integration.pushMaxAttempts,
       backoffBaseMs: integration.pushBackoffBaseMs,
       backoffMaxMs: integration.pushBackoffMaxMs,
+      breaker,
       log,
     });
     pushEnabled = true;
@@ -143,7 +170,9 @@ export function createIntegrationModule(deps: IntegrationModuleDeps): Integratio
     correlator,
     outbox,
     producer,
+    samples,
     dispatcher,
+    breaker,
     pushEnabled,
     start(): void {
       correlator.start();
@@ -151,10 +180,12 @@ export function createIntegrationModule(deps: IntegrationModuleDeps): Integratio
       dispatcher?.start();
       log(`[integration] modulo iniciado (push=${pushEnabled ? 'on' : 'off'})`);
     },
-    stop(): void {
+    async stop(): Promise<void> {
       dispatcher?.stop();
       producer.stop();
       correlator.stop();
+      // F4: drena a fila da serie temporal antes de encerrar.
+      await samples.stop();
     },
   };
 }
@@ -162,12 +193,27 @@ export function createIntegrationModule(deps: IntegrationModuleDeps): Integratio
 export { IntegrationInboxRepository } from './inboxRepository';
 export { IntegrationOutboxRepository } from './outboxRepository';
 export { IntegrationPushClient, signBody } from './pushClient';
+export { MeterSampleRepository } from './meterSampleRepository';
 export { OutboxDispatcher } from './outboxDispatcher';
+export { CircuitBreaker } from './circuitBreaker';
 export { TelemetryProducer } from './telemetryProducer';
 export { SessionCorrelator } from './sessionCorrelator';
+export {
+  computeDurationSeconds,
+  computeEnergyWh,
+  computeLatestPowerW,
+  computePowerW,
+  computeSessionMetrics,
+  computeSocPercent,
+  parseSampleValue,
+  samplesByMeasurand,
+} from './meterMetrics';
+export type { SessionMetrics } from './meterMetrics';
+export type { MeterSampleInput, MeterSampleRepositoryOptions, MeterSampleSink } from './meterSampleRepository';
+export type { CircuitBreakerOptions, CircuitState } from './circuitBreaker';
 export type { IntegrationOutboxRepositoryOptions, OutboxClaimedEvent } from './outboxRepository';
 export type { PushFetchLike, PushFetchResponse, PushResult } from './pushClient';
-export type { EventPusher, OutboxStore } from './outboxDispatcher';
+export type { CircuitGate, EventPusher, OutboxStore } from './outboxDispatcher';
 export type {
   TelemetryChargers,
   TelemetryMessage,
