@@ -239,6 +239,11 @@ export function createPersistenceService(
     ...writerOptions,
     table: 'ocpp_message_logs',
     onConflict: 'id',
+    // A mesma mensagem e reemitida com o mesmo `id` (publish -> markProcessed ->
+    // correlacao do response). Coalescer por `id` mantem uma unica linha por
+    // mensagem no lote: sem isso o `ON CONFLICT DO UPDATE` do PostgreSQL rejeita
+    // o lote inteiro ("cannot affect row a second time") e as mensagens se perdem.
+    dedupeKey: (row) => String(row.id ?? ''),
   });
   const heartbeats = new SupabaseBatchWriter<Record<string, unknown>>(client, {
     ...writerOptions,
