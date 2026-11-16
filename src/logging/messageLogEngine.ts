@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Direction, MessageStatus, OcppFrame, OcppMessageLog } from '../domain/types';
 import { boundedRawPayload, sanitizePayload } from './sanitize';
+import { toBrasiliaIso } from './time';
 
 /** Destino de persistencia. `write` deve ser nao-bloqueante (fila interna). */
 export interface MessageLogSink {
@@ -86,18 +87,6 @@ const CALL = 2;
 const CALL_RESULT = 3;
 const CALL_ERROR = 4;
 
-/** Converte epoch (ms) em ISO local com offset explicito (ex.: 2026-11-13T10:00:00.000+08:00). */
-function toLocalIso(ms: number): string {
-  const date = new Date(ms);
-  const offsetMinutes = -date.getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? '+' : '-';
-  const abs = Math.abs(offsetMinutes);
-  const hh = String(Math.floor(abs / 60)).padStart(2, '0');
-  const mm = String(abs % 60).padStart(2, '0');
-  const shifted = new Date(ms + offsetMinutes * 60_000);
-  return `${shifted.toISOString().slice(0, 23)}${sign}${hh}:${mm}`;
-}
-
 function toMessageType(messageTypeId: number): OcppMessageLog['messageType'] {
   if (messageTypeId === CALL) return 'CALL';
   if (messageTypeId === CALL_RESULT) return 'CALLRESULT';
@@ -117,7 +106,7 @@ function toDto(rec: InternalRecord): OcppMessageLog {
     uniqueId: rec.uniqueId,
     payload: rec.payload,
     observedAt: new Date(rec.observedAtMs).toISOString(),
-    observedAtLocal: toLocalIso(rec.observedAtMs),
+    observedAtLocal: toBrasiliaIso(rec.observedAtMs),
     processedAt: rec.processedAtMs === null ? null : new Date(rec.processedAtMs).toISOString(),
     respondedAt: rec.respondedAtMs === null ? null : new Date(rec.respondedAtMs).toISOString(),
     latencyMs: rec.latencyMs,

@@ -10,9 +10,12 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import type { AppConfig } from './config/env';
 import { loadConfig } from './config/env';
+import type { ConnectionEvent } from './domain/types';
+import type { AvailabilityProbeEvent } from './availability/availabilityProbe';
 import { ChargerStateService } from './chargers/chargerState';
 import { HeartbeatMonitor } from './heartbeat/heartbeatMonitor';
 import { OcppMessageLogEngine } from './logging/messageLogEngine';
+import { toBrasiliaIso } from './logging/time';
 import { ConnectionManager } from './transport/connectionManager';
 import { OcppWebSocketServer } from './transport/ocppWebSocketServer';
 import type { CsmsComponents } from './components';
@@ -169,18 +172,104 @@ export async function createApp(config: AppConfig = loadConfig(), deps: AppDepen
   const monitorWs = new MonitorWebSocketServer(components);
 
   const fastify = Fastify({
-    logger: { level: config.logLevel },
+    logger: {
+      level: config.logLevel,
+      // Timestamp legivel no horario de Brasilia. O padrao do pino seria epoch
+      // em ms (ilegivel e sempre em UTC).
+      timestamp: () => `,"time":"${toBrasiliaIso(Date.now())}"`,
+    },
     // O corpo dos comandos OCPP e pequeno; limite defensivo.
     bodyLimit: 1024 * 1024,
   });
+  // Logger da sonda de disponibilidade.
+  // A sonda roda ciclicamente e gera varios eventos por carregador. Para nao
+  // poluir o terminal com ruido repetitivo (trigger_rejected, cycle_completed,
+  // trigger_sent, cycle_started), estes eventos sao logados em nivel 'debug'.
+  // Apenas eventos que indicam mudanca de estado relevante ou possivel problema
+  // sao logados em nivel 'info', com mensagem clara em portugues.
+  const PROBE_EVENT_LABEL: Record<AvailabilityProbeEvent['event'], string> = {
+    cycle_started: 'inicio do ciclo de sondagem',
+    cycle_completed: 'fim do ciclo de sondagem',
+    trigger_sent: 'pedido de status enviado',
+    trigger_accepted: 'pedido de status aceito',
+    trigger_rejected: 'pedido de status recusado (comportamento normal para carregadores NeoCharge/MyTeison)',
+    unsupported: 'mensagem nao suportada pelo carregador',
+    report_received: 'resposta recebida do carregador',
+    trigger_timeout: 'timeout ao enviar pedido de status',
+    report_timeout: 'timeout esperando resposta do carregador',
+    disconnected: 'carregador desconectado durante a sondagem',
+    not_registered: 'carregador ainda nao registrado (BootNotification pendente)',
+    error: 'erro durante a sondagem',
+  };
+  // Eventos que geram muito ruido e sao normais na operacao: vao para 'debug'.
+  const PROBE_DEBUG_EVENTS: ReadonlySet<AvailabilityProbeEvent['event']> = new Set([
+    'cycle_started',
+    'cycle_completed',
+    'trigger_sent',
+    'trigger_accepted',
+    'trigger_rejected',
+  ]);
   components.availabilityProbe.setLogger((event) => {
-    fastify.log.info({ probe: event }, '[OCPP] sondagem de disponibilidade');
+    const label = PROBE_EVENT_LABEL[event.event] ?? event.event;
+    const requested = event.requestedMessage ? ` (${event.requestedMessage})` : '';
+    const message = `[OCPP] sonda: ${event.chargePointId} - ${label}${requested}`;
+    if (PROBE_DEBUG_EVENTS.has(event.event)) {
+      fastify.log.debug({ probe: event }, message);
+    } else {
+      fastify.log.info({ probe: event }, message);
+    }
   });
   // Toda tentativa de handshake OCPP passa a ser visivel, incluindo as que sao
   // rejeitadas (404 de path errado, subprotocolo invalido). Sem isto nao era
   // possivel distinguir "carregador nao chegou" de "chegou e foi rejeitado".
   components.wsServer.setLogger((event) => {
     fastify.log.info({ upgrade: event }, '[OCPP] tentativa de handshake');
+  });
+  // Ciclo de vida das conexoes visivel no terminal (alem do handshake): permite
+  // observar conexao/desconexao de cada carregador e o total conectado no
+  // momento. O timestamp de cada linha vem no horario de Brasilia.
+  const CONNECTION_EVENT_LABEL: Record<ConnectionEvent['eventType'], string> = {
+    attempt: 'tentativa de conexao',
+    accepted: 'conectado',
+    replaced: 'conexao substituida',
+    closed: 'desconectado',
+    rejected: 'conexao rejeitada',
+    watchdog_timeout: 'timeout de inatividade',
+    pong_timeout: 'timeout de keepalive',
+    error: 'erro de transporte',
+  };
+  const connectedChargePointIds = (): string[] =>
+    components.connections
+      .snapshot()
+      .filter((record) => record.transport === 'CONNECTED')
+      .map((record) => record.chargePointId)
+      .sort();
+  const logConnectedChargers = (): void => {
+    const ids = connectedChargePointIds();
+    const total = components.fleet.size();
+    fastify.log.info(
+      { connected: ids, connectedCount: ids.length, fleetSize: total },
+      `[CSMS] carregadores conectados (${ids.length}/${total}): ${ids.length ? ids.join(', ') : 'nenhum'}`,
+    );
+  };
+  components.connections.subscribe((event) => {
+    if (!event.chargePointId || event.eventType === 'attempt') return;
+    // 'accepted' ocorre duas vezes por sessao (socket e BootNotification);
+    // o segundo traz `metadata.kind === 'boot'`.
+    const label = event.metadata.kind === 'boot' ? 'registrado (BootNotification)' : CONNECTION_EVENT_LABEL[event.eventType];
+    fastify.log.info(
+      {
+        ocpp: {
+          chargePointId: event.chargePointId,
+          eventType: event.eventType,
+          connectionId: event.connectionId,
+          reason: event.disconnectReason,
+          ...event.metadata,
+        },
+      },
+      `[OCPP] carregador ${label}: ${event.chargePointId}`,
+    );
+    logConnectedChargers();
   });
   await fastify.register(cors, { origin: true });
   await registerRoutes(fastify, components);
@@ -242,6 +331,7 @@ export async function createApp(config: AppConfig = loadConfig(), deps: AppDepen
         },
         '[CSMS] servidor iniciado',
       );
+      logConnectedChargers();
     },
     async stop(): Promise<void> {
       components.reconnectionWatcher.stop();
