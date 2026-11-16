@@ -10,6 +10,18 @@ export function makeTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     host: '127.0.0.1',
     logLevel: 'silent',
     apiKey: '',
+    integrationKey: '',
+    integration: Object.freeze({
+      pushEnabled: false,
+      targetUrl: '',
+      hmacSecret: '',
+      pushIntervalMs: 5000,
+      pushBatchSize: 50,
+      pushTimeoutMs: 5000,
+      pushMaxAttempts: 8,
+      pushBackoffBaseMs: 2000,
+      pushBackoffMaxMs: 300_000,
+    }),
     ocpp: Object.freeze({
       lenientProtocolFallback: true,
       defaultHeartbeatIntervalSeconds: 60,

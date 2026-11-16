@@ -20,6 +20,8 @@ import { ConnectionManager } from './transport/connectionManager';
 import { OcppWebSocketServer } from './transport/ocppWebSocketServer';
 import type { CsmsComponents } from './components';
 import { registerRoutes } from './http/routes';
+import { createIntegrationModule } from './integration';
+import { registerIntegrationRoutes } from './integration/routes';
 import { MonitorWebSocketServer } from './http/monitorWebSocket';
 import {
   createPersistenceService,
@@ -273,6 +275,23 @@ export async function createApp(config: AppConfig = loadConfig(), deps: AppDepen
   });
   await fastify.register(cors, { origin: true });
   await registerRoutes(fastify, components);
+  // Modulo de integracao (F2): consome apenas superficies publicas ja existentes
+  // (`components.chargers`, `components.messageLog`, `components.wsServer`) sem
+  // tocar o OCPP. As rotas ficam FORA de `/api/` (auth dedicada por
+  // `x-integration-key`); se o modulo estiver desabilitado, `repository` e nulo e
+  // as rotas respondem 503.
+  const integration = createIntegrationModule({
+    config,
+    chargers: components.chargers,
+    messages: components.messageLog,
+    log: (msg, meta) => fastify.log.info({ integration: true, meta }, msg),
+  });
+  await registerIntegrationRoutes(fastify, {
+    config,
+    repository: integration.repository,
+    wsServer: components.wsServer,
+    log: (msg, meta) => fastify.log.info({ integration: true, meta }, msg),
+  });
   // Central de Monitoramento (UI estatica) servida na raiz. `..` funciona tanto
   // em dev (src/) quanto compilado (dist/), apontando para a pasta `public/`.
   await fastify.register(fastifyStatic, {
@@ -314,6 +333,7 @@ export async function createApp(config: AppConfig = loadConfig(), deps: AppDepen
       components.fleetStateSyncer.start();
       components.availabilityProbe.start();
       components.reconnectionWatcher.start();
+      integration.start();
       await fastify.listen({ port: config.port, host: config.host });
       fastify.log.info(
         {
@@ -337,6 +357,7 @@ export async function createApp(config: AppConfig = loadConfig(), deps: AppDepen
       components.reconnectionWatcher.stop();
       components.fleetStateSyncer.stop();
       components.availabilityProbe.stop();
+      integration.stop();
       components.wsServer.closeAll();
       monitorWs.closeAll();
       // Drena a fila de persistencia antes de encerrar (spec §6).

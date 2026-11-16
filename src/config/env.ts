@@ -30,6 +30,30 @@ export interface AppConfig {
   readonly host: string;
   readonly logLevel: string;
   readonly apiKey: string;
+  /**
+   * Chave dedicada do modulo de integracao com o CSMS ANTIGO. Distinta de
+   * `apiKey`; exigida no header `x-integration-key` das rotas /integration/v1/*.
+   * Vazia desabilita a integracao (respondem 503).
+   */
+  readonly integrationKey: string;
+
+  /**
+   * Integracao de telemetria NOVO -> ANTIGO (F3). O push so e habilitado quando
+   * `pushEnabled` e verdadeiro E `targetUrl`/`hmacSecret` estao preenchidos.
+   */
+  readonly integration: {
+    readonly pushEnabled: boolean;
+    /** Base do ANTIGO, ex.: `http://127.0.0.1:3000`. */
+    readonly targetUrl: string;
+    /** Segredo compartilhado do HMAC (`x-signature`), distinto de `integrationKey`. */
+    readonly hmacSecret: string;
+    readonly pushIntervalMs: number;
+    readonly pushBatchSize: number;
+    readonly pushTimeoutMs: number;
+    readonly pushMaxAttempts: number;
+    readonly pushBackoffBaseMs: number;
+    readonly pushBackoffMaxMs: number;
+  };
 
   readonly ocpp: {
     readonly lenientProtocolFallback: boolean;
@@ -81,6 +105,19 @@ export function loadConfig(): AppConfig {
     host: readString('HOST', '0.0.0.0'),
     logLevel: readString('LOG_LEVEL', 'info'),
     apiKey,
+    integrationKey: readString('INTEGRATION_API_KEY'),
+
+    integration: Object.freeze({
+      pushEnabled: readBool('INTEGRATION_PUSH_ENABLED', false),
+      targetUrl: readString('INTEGRATION_TARGET_URL'),
+      hmacSecret: readString('INTEGRATION_HMAC_SECRET'),
+      pushIntervalMs: Math.max(500, readNumber('INTEGRATION_PUSH_INTERVAL_MS', 5000)),
+      pushBatchSize: Math.max(1, readNumber('INTEGRATION_PUSH_BATCH_SIZE', 50)),
+      pushTimeoutMs: Math.max(250, readNumber('INTEGRATION_PUSH_TIMEOUT_MS', 5000)),
+      pushMaxAttempts: Math.max(1, readNumber('INTEGRATION_PUSH_MAX_ATTEMPTS', 8)),
+      pushBackoffBaseMs: Math.max(100, readNumber('INTEGRATION_PUSH_BACKOFF_BASE_MS', 2000)),
+      pushBackoffMaxMs: Math.max(1000, readNumber('INTEGRATION_PUSH_BACKOFF_MAX_MS', 300_000)),
+    }),
 
     ocpp: Object.freeze({
       lenientProtocolFallback: readBool('OCPP_LENIENT_PROTOCOL_FALLBACK', true),
