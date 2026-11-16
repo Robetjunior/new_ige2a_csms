@@ -37,6 +37,7 @@ export function makeTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       statusProbeConnectorId: null,
       fleetEnabled: true,
       fleetFile: '',
+      publicStatusChargePointIds: [],
       reconnectionGraceMultiplier: 2,
       reconnectionToleranceSeconds: 30,
       reconnectionCheckIntervalMs: 15_000,

@@ -50,6 +50,15 @@ h1, h2 { margin: 0; }
   min-width: 240px;
   font-size: 12px;
 }
+.public-notice {
+  margin: 12px 20px 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  border-radius: 8px;
+  background: rgba(210, 153, 34, 0.12);
+  color: #e3b341;
+  font-size: 12px;
+}
 
 /* --- Buttons / badges --------------------------------------------------- */
 .btn {
@@ -116,6 +125,7 @@ h1, h2 { margin: 0; }
   border-radius: 10px;
   overflow: hidden;
 }
+.charger.public-readonly { cursor: default; }
 .panel-head {
   display: flex;
   align-items: center;
@@ -175,6 +185,31 @@ h1, h2 { margin: 0; }
 }
 .cmd-form textarea { min-height: 64px; resize: vertical; }
 .cmd-result { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+.remote-start-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.remote-start-field { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.remote-start-field input, .remote-start-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+.remote-start-form button { align-self: end; min-height: 34px; }
+.remote-start-form button:disabled { cursor: not-allowed; opacity: 0.5; }
+@media (max-width: 640px) {
+  .remote-start-form { grid-template-columns: 1fr; }
+}
 
 .detail h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin: 14px 0 6px; }
 .probe-toolbar, .probe-statuses { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }

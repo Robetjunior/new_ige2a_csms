@@ -3,6 +3,7 @@
 
 const MAX_MESSAGES = 2000;
 const OVERVIEW_REFRESH_MS = 10_000;
+const PUBLIC_STATUS_REFRESH_MS = 5_000;
 const SSE_RETRY_BASE_MS = 1_000;
 const COMMON_ACTIONS = [
   'Reset',
@@ -25,13 +26,24 @@ const state = {
   fleetSummary: null,
   selected: null,
   source: null,
+  streamRetryTimer: null,
   retryMs: SSE_RETRY_BASE_MS,
+  publicStatus: false,
 };
 
 const $ = (id) => document.getElementById(id);
 
 /* --- API key ------------------------------------------------------------ */
+function isSecureApiOrigin() {
+  return (
+    window.location.protocol === 'https:' ||
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1' ||
+    window.location.hostname === '[::1]'
+  );
+}
 function apiKey() {
+  if (!isSecureApiOrigin()) return '';
   return (localStorage.getItem('csms_api_key') || '').trim();
 }
 function apiHeaders(extra) {
@@ -249,7 +261,7 @@ function chargerCard(entry) {
   const conn = entry.connection;
   const hb = entry.heartbeat || state.heartbeat.get(id) || null;
   const charger = entry.charger || null;
-  const card = el('div', `charger ${state.selected === id ? 'selected' : ''}`);
+  const card = el('div', `charger ${state.selected === id ? 'selected' : ''}${state.publicStatus ? ' public-readonly' : ''}`);
   card.dataset.id = id;
 
   const row1 = el('div', 'row1');
@@ -277,8 +289,8 @@ function chargerCard(entry) {
     meta.appendChild(metaItem('intervalo', `${hb.negotiatedIntervalSeconds}s`));
     meta.appendChild(metaItem('último HB', hb.lastHeartbeatAt ? timeAgo(hb.lastHeartbeatAt) : 'nunca'));
     meta.appendChild(metaItem('HBs', hb.heartbeatCount));
-    meta.appendChild(metaItem('atrasados', hb.delayedCount));
-    if (hb.averageLatencyMs !== null) meta.appendChild(metaItem('lat.média', `${hb.averageLatencyMs}ms`));
+    if (Number.isFinite(hb.delayedCount)) meta.appendChild(metaItem('atrasados', hb.delayedCount));
+    if (Number.isFinite(hb.averageLatencyMs)) meta.appendChild(metaItem('lat.média', `${hb.averageLatencyMs}ms`));
   }
   if (conn) meta.appendChild(metaItem('última msg', conn.lastMessageAt ? timeAgo(conn.lastMessageAt) : '—'));
   if (fleet) {
@@ -298,7 +310,7 @@ function chargerCard(entry) {
   }
   card.appendChild(meta);
 
-  card.addEventListener('click', () => selectCharger(id));
+  if (!state.publicStatus) card.addEventListener('click', () => selectCharger(id));
   return card;
 }
 function metaItem(label, value) {
@@ -321,6 +333,26 @@ function renderChargers() {
 }
 
 function renderKpis() {
+  if (state.publicStatus) {
+    const online = Array.from(state.chargers.values()).filter((c) => c.connected).length;
+    const heartbeatCount = Array.from(state.chargers.values()).reduce(
+      (total, c) => total + (c.heartbeat?.heartbeatCount || 0),
+      0,
+    );
+    const publicKpis = [
+      { label: 'Carregadores conectados', value: `${online} / ${state.chargers.size}` },
+      { label: 'Heartbeats OCPP recebidos', value: heartbeatCount },
+    ];
+    const container = $('kpis');
+    container.textContent = '';
+    for (const k of publicKpis) {
+      const box = el('div', 'kpi');
+      box.appendChild(el('div', 'label', k.label));
+      box.appendChild(el('div', 'value', k.value));
+      container.appendChild(box);
+    }
+    return;
+  }
   const stats = state.stats || { received: 0, sent: 0, errors: 0, buffered: 0 };
   const connected = Array.from(state.chargers.values()).filter((c) => c.connected).length;
   const fleet = state.fleetSummary;
@@ -347,6 +379,7 @@ function renderKpis() {
 
 /* --- Diagnostico / detalhe --------------------------------------------- */
 async function selectCharger(id) {
+  if (state.publicStatus) return;
   state.selected = id;
   renderChargers();
   $('detail-title').textContent = `Diagnóstico — ${id}`;
@@ -496,8 +529,99 @@ function renderDetail(id, diagnosis, full) {
   }
   const textarea = el('textarea');
   textarea.value = '{\n  \n}';
+  const transactionControls = el('div', 'transaction-command-fields');
+  const connectorLabel = el('label', 'transaction-command-field');
+  connectorLabel.appendChild(el('span', null, 'Conector'));
+  const connectorSelect = el('select');
+  const physicalConnectors = (charger?.connectors || []).filter((connector) => connector.connectorId > 0);
+  for (const connector of physicalConnectors) {
+    const option = el('option', null, `Conector ${connector.connectorId} · ${connector.status}`);
+    option.value = String(connector.connectorId);
+    connectorSelect.appendChild(option);
+  }
+  const defaultConnector =
+    physicalConnectors.find((connector) => connector.status === 'Available') || physicalConnectors[0];
+  if (defaultConnector) connectorSelect.value = String(defaultConnector.connectorId);
+  connectorLabel.appendChild(connectorSelect);
+
+  const chargerIdLabel = el('label', 'transaction-command-field');
+  chargerIdLabel.appendChild(el('span', null, 'ID do carregador selecionado'));
+  const chargerIdInput = el('input');
+  chargerIdInput.value = id;
+  chargerIdInput.readOnly = true;
+  chargerIdLabel.appendChild(chargerIdInput);
+
+  const idTagLabel = el('label', 'transaction-command-field');
+  idTagLabel.appendChild(el('span', null, 'idTag automático do carregador'));
+  const idTagInput = el('input');
+  idTagInput.value = id;
+  idTagInput.readOnly = true;
+  idTagInput.autocomplete = 'off';
+  idTagLabel.appendChild(idTagInput);
+  const transactionHint = el('div', 'hint');
+
+  const activeTransactions = Array.isArray(charger?.activeTransactions) ? charger.activeTransactions : [];
+  const activeTransactionForConnector = () =>
+    activeTransactions.find((transaction) => transaction.connectorId === Number(connectorSelect.value));
+  const updateTransactionFields = () => {
+    const action = select.value;
+    const isStart = action === 'RemoteStartTransaction';
+    const isStop = action === 'RemoteStopTransaction';
+    transactionControls.hidden = !isStart && !isStop;
+    idTagLabel.hidden = !isStart;
+    connectorLabel.hidden = !isStart && !isStop;
+    if (isStart) {
+      transactionHint.textContent =
+        'O idTag será preenchido com o ID deste carregador. O início ainda depende da autorização e resposta do equipamento.';
+      textarea.value = JSON.stringify(
+        { connectorId: Number(connectorSelect.value || 1), idTag: id },
+        null,
+        2,
+      );
+    } else if (isStop) {
+      const transaction = activeTransactionForConnector();
+      transactionHint.textContent = transaction
+        ? `Parada da transação ativa ${transaction.transactionId} no conector selecionado. RemoteStopTransaction usa transactionId, não idTag.`
+        : 'Não há transação ativa conhecida neste conector para parar. O idTag não é usado pelo RemoteStopTransaction.';
+      textarea.value = transaction ? JSON.stringify({ transactionId: transaction.transactionId }, null, 2) : '{}';
+    } else {
+      transactionHint.textContent = '';
+    }
+    if (isStart) {
+      const connector = physicalConnectors.find(
+        (item) => item.connectorId === Number(connectorSelect.value),
+      );
+      btn.disabled =
+        !apiKey() ||
+        !full.online ||
+        !connector ||
+        connector.status !== 'Available' ||
+        connector.errorCode !== 'NoError';
+    } else if (isStop) {
+      btn.disabled = !apiKey() || !full.online || !activeTransactionForConnector();
+    } else {
+      btn.disabled = false;
+    }
+  };
+  select.addEventListener('change', () => {
+    if (select.value === 'RemoteStopTransaction') {
+      const activeTransaction = activeTransactions.find((transaction) =>
+        physicalConnectors.some((connector) => connector.connectorId === transaction.connectorId),
+      );
+      if (activeTransaction) connectorSelect.value = String(activeTransaction.connectorId);
+    } else if (select.value === 'RemoteStartTransaction' && defaultConnector) {
+      const available = physicalConnectors.find(
+        (connector) => connector.status === 'Available' && connector.errorCode === 'NoError',
+      );
+      if (available) connectorSelect.value = String(available.connectorId);
+    }
+    updateTransactionFields();
+  });
+  connectorSelect.addEventListener('change', updateTransactionFields);
+  transactionControls.append(chargerIdLabel, connectorLabel, idTagLabel, transactionHint);
   const btn = el('button', 'btn primary', 'Enviar');
   const result = el('div', 'cmd-result');
+  updateTransactionFields();
   btn.addEventListener('click', async () => {
     let payload = {};
     try {
@@ -505,6 +629,38 @@ function renderDetail(id, diagnosis, full) {
     } catch {
       result.textContent = 'payload JSON inválido';
       return;
+    }
+    if (select.value === 'RemoteStartTransaction') {
+      if (!apiKey()) {
+        result.textContent = 'Para enviar comandos, abra o painel por HTTPS e autentique-se.';
+        return;
+      }
+      payload = { ...payload, connectorId: Number(connectorSelect.value || 1), idTag: id };
+      if (
+        !window.confirm(
+          `Confirma solicitar início da transação?\n\nCarregador: ${id}\nConector: ${payload.connectorId}\nidTag automático: ${id}\n\nSe houver um veículo conectado, a recarga poderá começar.`,
+        )
+      ) {
+        return;
+      }
+    } else if (select.value === 'RemoteStopTransaction') {
+      if (!apiKey()) {
+        result.textContent = 'Para enviar comandos, abra o painel por HTTPS e autentique-se.';
+        return;
+      }
+      const transaction = activeTransactionForConnector();
+      if (!transaction) {
+        result.textContent = 'Não há transactionId ativo conhecido para este conector.';
+        return;
+      }
+      payload = { transactionId: transaction.transactionId };
+      if (
+        !window.confirm(
+          `Confirma solicitar a parada da transação?\n\nCarregador: ${id}\nConector: ${connectorSelect.value}\ntransactionId: ${transaction.transactionId}`,
+        )
+      ) {
+        return;
+      }
     }
     btn.disabled = true;
     result.textContent = 'enviando...';
@@ -514,14 +670,23 @@ function renderDetail(id, diagnosis, full) {
         headers: apiHeaders({ 'content-type': 'application/json' }),
         body: JSON.stringify({ action: select.value, payload }),
       });
-      result.textContent = JSON.stringify(res, null, 2);
+      const status = res.result?.status;
+      result.textContent =
+        select.value === 'RemoteStartTransaction' && status === 'Accepted'
+          ? 'Solicitação aceita pelo carregador; aguardando StartTransaction/Charging para confirmar início.'
+          : select.value === 'RemoteStopTransaction' && status === 'Accepted'
+            ? 'Solicitação de parada aceita pelo carregador; aguardando StopTransaction/Available para confirmar.'
+            : JSON.stringify(res, null, 2);
     } catch (err) {
       result.textContent = `falha: ${err.message}`;
     } finally {
-      btn.disabled = false;
+      if (select.value === 'RemoteStartTransaction' || select.value === 'RemoteStopTransaction') {
+        setTimeout(() => void selectCharger(id), 1000);
+      } else btn.disabled = false;
     }
   });
   form.appendChild(select);
+  form.appendChild(transactionControls);
   form.appendChild(textarea);
   form.appendChild(btn);
   form.appendChild(result);
@@ -570,8 +735,11 @@ async function download(format) {
 /* --- Estado / tempo real (SSE) ----------------------------------------- */
 function setStreamState(connected) {
   const node = $('stream-state');
-  node.textContent = connected ? 'tempo real ativo' : 'desconectado';
+  node.textContent = state.publicStatus ? 'status público · atualiza 5 s' : connected ? 'tempo real ativo' : 'desconectado';
   node.className = `badge ${connected ? 'badge-on' : 'badge-off'}`;
+  node.title = state.publicStatus
+    ? 'Consulta read-only; não transmite mensagens OCPP'
+    : 'Estado do canal de tempo real';
 }
 
 function applyOverview(payload) {
@@ -600,6 +768,43 @@ function applyOverview(payload) {
     }
   }
   if (payload.messageStats) state.stats = payload.messageStats;
+  state.publicStatus = false;
+  $('public-notice').hidden = true;
+  $('terminal-panel').hidden = false;
+  syncChargerFilter();
+  renderKpis();
+  renderChargers();
+}
+
+function applyPublicStatus(payload) {
+  state.publicStatus = true;
+  state.stats = null;
+  state.selected = null;
+  const entries = (payload.chargers || []).map((charger) => ({
+    chargePointId: charger.chargePointId,
+    connected: charger.connected,
+    connection: {
+      transport: charger.connected ? 'CONNECTED' : 'DISCONNECTED',
+      registration: charger.registration,
+      operational: charger.operational,
+      lastMessageAt: charger.lastMessageAt,
+    },
+    heartbeat: charger.heartbeat,
+    charger: { connectors: charger.connectors || [] },
+    fleet: null,
+  }));
+  state.chargers = new Map(entries.map((entry) => [entry.chargePointId, entry]));
+  state.fleetSummary = null;
+  $('terminal-panel').hidden = true;
+  $('public-notice').hidden = false;
+  $('public-notice').textContent =
+    `Status público somente leitura. Última consulta: ${fmtTime(payload.generatedAt)} BRT. Atualiza a cada 5 s. ` +
+    'Mensagens, diagnóstico e comandos exigem acesso autenticado por HTTPS.';
+  $('detail-title').textContent = 'Detalhes protegidos';
+  $('detail-sub').textContent = '';
+  $('detail').textContent = '';
+  $('detail').appendChild(el('p', 'empty', 'Este painel mostra somente conexão e status básico. A chave não é enviada por HTTP.'));
+  setStreamState(true);
   syncChargerFilter();
   renderKpis();
   renderChargers();
@@ -621,15 +826,33 @@ function syncChargerFilter() {
 }
 
 async function refreshOverview() {
+  if (!apiKey()) {
+    try {
+      const response = await fetch('/api/public/status', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      applyPublicStatus(await response.json());
+    } catch {
+      setStreamState(false);
+      $('public-notice').hidden = false;
+      $('public-notice').textContent = 'Não foi possível consultar o status público dos carregadores.';
+    }
+    return;
+  }
   try {
     const data = await apiFetch('/api/chargers');
     applyOverview(data);
   } catch {
-    /* ignora falha pontual */
+    try {
+      const response = await fetch('/api/public/status', { cache: 'no-store' });
+      if (response.ok) applyPublicStatus(await response.json());
+    } catch {
+      /* ignora falha pontual */
+    }
   }
 }
 
 async function loadRecentMessages() {
+  if (!apiKey()) return;
   try {
     const data = await apiFetch('/api/messages?limit=500');
     for (const m of (data.messages || []).reverse()) ingestMessage(m); // mais antigo -> mais novo
@@ -644,68 +867,44 @@ async function loadRecentMessages() {
 }
 
 function connectStream() {
-  if (state.source) state.source.close();
+  if (state.source) state.source.abort();
+  if (state.streamRetryTimer) clearTimeout(state.streamRetryTimer);
+  state.streamRetryTimer = null;
   const key = apiKey();
-  const url = `/api/stream${key ? `?api_key=${encodeURIComponent(key)}` : ''}`;
-  const source = new EventSource(url);
-  state.source = source;
-
-  source.addEventListener('open', () => {
-    state.retryMs = SSE_RETRY_BASE_MS;
-    setStreamState(true);
-  });
-  source.addEventListener('error', () => {
-    setStreamState(false);
-    source.close();
+  if (!key) {
     state.source = null;
-    const delay = Math.min(state.retryMs, 15000);
-    state.retryMs = Math.min(state.retryMs * 2, 15000);
-    setTimeout(connectStream, delay);
-  });
-  source.addEventListener('snapshot', (ev) => {
-    try {
-      applyOverview(JSON.parse(ev.data));
-    } catch {
-      /* noop */
-    }
-  });
-  source.addEventListener('ocpp-message', (ev) => {
-    try {
-      ingestMessage(JSON.parse(ev.data));
-    } catch {
-      /* noop */
-    }
-  });
-  source.addEventListener('connection', () => {
     void refreshOverview();
-  });
-  source.addEventListener('charger-state', (ev) => {
-    try {
-      const update = JSON.parse(ev.data);
+    return;
+  }
+  const controller = new AbortController();
+  state.source = controller;
+  void consumeEventStream(controller, key);
+}
+
+function handleStreamEvent(type, data) {
+  try {
+    if (type === 'snapshot') {
+      applyOverview(JSON.parse(data));
+    } else if (type === 'ocpp-message') {
+      ingestMessage(JSON.parse(data));
+    } else if (type === 'connection') {
+      void refreshOverview();
+    } else if (type === 'charger-state') {
+      const update = JSON.parse(data);
       const entry = state.chargers.get(update.chargePointId);
       if (entry) entry.charger = update.charger;
       renderChargers();
       if (state.selected === update.chargePointId) void selectCharger(update.chargePointId);
-    } catch {
-      /* noop */
-    }
-  });
-  source.addEventListener('availability-probe', (ev) => {
-    try {
-      const update = JSON.parse(ev.data);
+    } else if (type === 'availability-probe') {
+      const update = JSON.parse(data);
       const entry = state.chargers.get(update.snapshot.chargePointId);
       if (entry) entry.availabilityProbe = update.snapshot;
       renderChargers();
       if (state.selected === update.snapshot.chargePointId && update.event.event === 'cycle_completed') {
         void selectCharger(update.snapshot.chargePointId);
       }
-    } catch {
-      /* noop */
-    }
-  });
-  source.addEventListener('fleet-status', (ev) => {
-    try {
-      const update = JSON.parse(ev.data);
+    } else if (type === 'fleet-status') {
+      const update = JSON.parse(data);
       const entry = state.chargers.get(update.chargePointId);
       if (entry) {
         entry.fleet = Object.assign({}, entry.fleet || {}, {
@@ -717,30 +916,86 @@ function connectStream() {
       }
       renderChargers();
       renderKpis();
-    } catch {
-      /* noop */
-    }
-  });
-  source.addEventListener('heartbeat', (ev) => {
-    try {
-      const list = JSON.parse(ev.data);
+    } else if (type === 'heartbeat') {
+      const list = JSON.parse(data);
       state.heartbeat = new Map(list.map((h) => [h.chargePointId, h]));
       for (const entry of state.chargers.values()) {
         const hb = state.heartbeat.get(entry.chargePointId);
         if (hb) entry.heartbeat = hb;
       }
       renderChargers();
-    } catch {
-      /* noop */
     }
-  });
+  } catch {
+    /* Ignore malformed events without interrupting the stream. */
+  }
+}
+
+function dispatchSseBlock(block) {
+  let event = 'message';
+  const data = [];
+  for (const line of block.split('\n')) {
+    if (line.startsWith(':')) continue;
+    const separator = line.indexOf(':');
+    const field = separator < 0 ? line : line.slice(0, separator);
+    const value = separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
+    if (field === 'event') event = value;
+    else if (field === 'data') data.push(value);
+  }
+  if (data.length) handleStreamEvent(event, data.join('\n'));
+}
+
+async function consumeEventStream(controller, key) {
+  try {
+    const response = await fetch('/api/stream', {
+      headers: { 'x-api-key': key, accept: 'text/event-stream' },
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.body) throw new Error('Stream não suportado pelo navegador');
+
+    state.retryMs = SSE_RETRY_BASE_MS;
+    setStreamState(true);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+      let boundary;
+      while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+        dispatchSseBlock(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+      }
+    }
+    if (!controller.signal.aborted) throw new Error('Stream encerrado');
+  } catch {
+    if (controller.signal.aborted) return;
+    setStreamState(false);
+    if (state.source === controller) state.source = null;
+    const delay = Math.min(state.retryMs, 15000);
+    state.retryMs = Math.min(state.retryMs * 2, 15000);
+    state.streamRetryTimer = setTimeout(() => {
+      state.streamRetryTimer = null;
+      connectStream();
+    }, delay);
+  }
 }
 
 /* --- Bootstrap ---------------------------------------------------------- */
 function bindUi() {
-  $('api-key').value = apiKey();
-  $('api-key').addEventListener('change', () => {
-    localStorage.setItem('csms_api_key', $('api-key').value.trim());
+  const keyInput = $('api-key');
+  keyInput.value = apiKey();
+  if (!isSecureApiOrigin()) {
+    localStorage.removeItem('csms_api_key');
+    keyInput.value = '';
+    keyInput.hidden = true;
+    keyInput.title = 'A chave só pode ser usada com HTTPS.';
+  }
+  keyInput.addEventListener('change', () => {
+    if (!isSecureApiOrigin()) return;
+    localStorage.setItem('csms_api_key', keyInput.value.trim());
     connectStream();
     void refreshOverview();
     void loadRecentMessages();
@@ -777,7 +1032,7 @@ function start() {
   connectStream();
   void refreshOverview();
   void loadRecentMessages();
-  setInterval(() => void refreshOverview(), OVERVIEW_REFRESH_MS);
+  setInterval(() => void refreshOverview(), apiKey() ? OVERVIEW_REFRESH_MS : PUBLIC_STATUS_REFRESH_MS);
   setInterval(() => {
     // Atualiza os "time ago" sem depender de novo evento.
     renderChargers();

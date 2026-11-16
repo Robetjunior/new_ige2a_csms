@@ -157,10 +157,10 @@ export async function registerRoutes(fastify: FastifyInstance, components: CsmsC
 
   fastify.addHook('onRequest', async (request, reply) => {
     if (!apiKey) return;
+    if ((request.raw.url ?? '').split('?')[0] === '/api/public/status') return;
     if (!(request.raw.url ?? '').startsWith('/api/')) return;
     const header = request.headers['x-api-key'];
-    const fromQuery = (request.query as Record<string, unknown> | undefined)?.api_key;
-    const presented = typeof header === 'string' ? header.trim() : typeof fromQuery === 'string' ? fromQuery.trim() : '';
+    const presented = typeof header === 'string' ? header.trim() : '';
     if (presented !== apiKey) {
       await reply.code(401).send({ error: 'unauthorized', message: 'CSMS_API_KEY invalida ou ausente' });
     }
@@ -173,6 +173,40 @@ export async function registerRoutes(fastify: FastifyInstance, components: CsmsC
     connectedChargers: components.wsServer.connectedChargePointIds().length,
     timestamp: new Date().toISOString(),
   }));
+
+  // Status minimo para o painel read-only. IDs precisam ser configurados
+  // explicitamente; nao retorna IP, firmware, mensagens nem dados de comandos.
+  fastify.get('/api/public/status', async (_request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const chargers = components.config.ocpp.publicStatusChargePointIds.map((chargePointId) => {
+      const connected = components.wsServer.isConnected(chargePointId);
+      const connection = components.connections.get(chargePointId);
+      const heartbeat = components.heartbeat.getStatus(chargePointId);
+      const charger = components.chargers.get(chargePointId);
+      return {
+        chargePointId,
+        connected,
+        registration: connection?.registration ?? 'NOT_REGISTERED',
+        operational: connected ? connection?.operational ?? 'OFFLINE' : 'OFFLINE',
+        lastMessageAt: connection?.lastMessageAt ?? null,
+        heartbeat: {
+          negotiatedIntervalSeconds: heartbeat.negotiatedIntervalSeconds,
+          lastHeartbeatAt: heartbeat.lastHeartbeatAt,
+          heartbeatCount: heartbeat.heartbeatCount,
+          classification: heartbeat.classification,
+        },
+        connectors: charger
+          ? Array.from(charger.connectors.values()).map(({ connectorId, status, errorCode, updatedAt }) => ({
+              connectorId,
+              status,
+              errorCode,
+              updatedAt,
+            }))
+          : [],
+      };
+    });
+    return { generatedAt: new Date().toISOString(), chargers };
+  });
 
   fastify.get('/api/overview', async () => ({
     generatedAt: new Date().toISOString(),

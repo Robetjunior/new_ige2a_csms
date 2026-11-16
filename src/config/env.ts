@@ -72,6 +72,8 @@ export interface AppConfig {
     readonly fleetEnabled: boolean;
     /** Arquivo JSON (opcional) com a frota esperada; '' desabilita a fonte local. */
     readonly fleetFile: string;
+    /** IDs cujo status operacional minimo pode ser consultado sem API key. */
+    readonly publicStatusChargePointIds: readonly string[];
     /** N ciclos de heartbeat sem retorno antes de alertar "aguardando reconexao". */
     readonly reconnectionGraceMultiplier: number;
     /** Tolerancia adicional (s) somada a janela de reconexao. */
@@ -95,6 +97,14 @@ export function loadConfig(): AppConfig {
   const apiKey = readString('CSMS_API_KEY') || readString('API_KEY');
   const probeConnectorRaw = readString('OCPP_STATUS_PROBE_CONNECTOR_ID');
   const probeConnectorId = probeConnectorRaw ? Number(probeConnectorRaw) : null;
+  const publicStatusChargePointIds = Array.from(
+    new Set(
+      readString('OCPP_PUBLIC_STATUS_IDS')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  );
 
   return Object.freeze({
     env: readString('NODE_ENV', 'development'),
@@ -143,6 +153,7 @@ export function loadConfig(): AppConfig {
           : null,
       fleetEnabled: readBool('OCPP_FLEET_ENABLED', true),
       fleetFile: readString('OCPP_FLEET_FILE'),
+      publicStatusChargePointIds: Object.freeze(publicStatusChargePointIds),
       reconnectionGraceMultiplier: Math.max(1, readNumber('OCPP_RECONNECTION_GRACE_MULTIPLIER', 2)),
       reconnectionToleranceSeconds: Math.max(0, readNumber('OCPP_RECONNECTION_TOLERANCE_SECONDS', 30)),
       reconnectionCheckIntervalMs: Math.max(1000, readNumber('OCPP_RECONNECTION_CHECK_INTERVAL_MS', 15_000)),
