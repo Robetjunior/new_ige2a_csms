@@ -1,4 +1,4 @@
-````import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MeterSampleRepository } from '../src/integration/meterSampleRepository';
 import type { AnySupabaseClient } from '../src/persistence/supabaseBatchWriter';
