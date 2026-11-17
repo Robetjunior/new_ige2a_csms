@@ -255,6 +255,25 @@ export async function registerIntegrationRoutes(
           });
         }
       }
+      // Best-effort: libera o conector fisico que ficou em PREPARING (cabo nao
+      // conectado, sem StartTransaction). Sem isso o carregador permanece preso
+      // em PREPARING e nunca volta a AVAILABLE. Nao bloqueia a resposta: se o
+      // carregador estiver offline ou nao suportar a acao, apenas registramos.
+      try {
+        await wsServer.sendCall(
+          session.charge_point_id,
+          'UnlockConnector',
+          { connectorId: session.connector_id },
+          COMMAND_TIMEOUT_MS,
+        );
+      } catch (err) {
+        log('[integration] falha ao enviar UnlockConnector (cancelamento)', {
+          chargePointId: session.charge_point_id,
+          integrationSessionId,
+          connectorId: session.connector_id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
       await reply.code(202).send({ ok: true, integrationSessionId, status: 'cancelled' });
       return;
     }

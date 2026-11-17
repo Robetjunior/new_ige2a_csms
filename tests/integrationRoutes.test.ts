@@ -376,8 +376,12 @@ test('stop em PENDING_ACK sem transacao OCPP: 202 cancelled, STOPPED e session.s
 
   assert.equal(res.statusCode, 202);
   assert.deepEqual(res.json(), { ok: true, integrationSessionId: 'S1', status: 'cancelled' });
-  // Nao envia RemoteStopTransaction, pois nao ha transactionId.
-  assert.equal(ws.calls.length, 0);
+  // Nao envia RemoteStopTransaction (nao ha transactionId), mas libera o conector
+  // fisico que ficou preso em PREPARING via UnlockConnector.
+  assert.equal(ws.calls.length, 1);
+  assert.equal(ws.calls[0]?.chargePointId, 'CP-1');
+  assert.equal(ws.calls[0]?.action, 'UnlockConnector');
+  assert.deepEqual(ws.calls[0]?.payload, { connectorId: 1 });
   // Sessao local e encerrada.
   assert.equal(repo.upsertCalls.length, 1);
   assert.equal(repo.upsertCalls[0]?.state, 'STOPPED');
