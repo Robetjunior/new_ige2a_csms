@@ -48,6 +48,23 @@ INTEGRATION_EVENT_MAX_FUTURE_SKEW_MS=300000
 > `INTEGRATION_TARGET_URL` aponta para o ANTIGO. Se os dois CSMS estiverem na
 > mesma VM, use `http://127.0.0.1:3000`; caso contrário, o host/IP do ANTIGO.
 
+### 0.3 Chaves de integração (delegação de comandos ANTIGO → NOVO)
+
+O ANTIGO **não é mais dono do socket OCPP**: ao iniciar/encerrar uma recarga ele
+delega o comando ao NOVO (rota `new_csms`). Isso exige credenciais alinhadas
+entre os dois CSMS:
+
+| Uso | NOVO (`.env`) | ANTIGO (`.env`) | Regra |
+| --- | --- | --- | --- |
+| Comando start/stop | `INTEGRATION_API_KEY` | `NEW_CSMS_INTEGRATION_KEY` | **devem ser idênticas** |
+| Leitura do roster | `CSMS_API_KEY` | `NEW_CSMS_API_KEY` | **devem ser idênticas** |
+| URL do NOVO | — | `NEW_CSMS_BASE_URL` | ex.: `http://127.0.0.1:3100` |
+
+> `INTEGRATION_API_KEY` vazio no NOVO ⇒ a rota F2 responde **503
+> `integration_disabled`**; divergente ⇒ **401 `unauthorized`**. O ANTIGO
+> traduz 401/503 para o erro `new_csms_unauthorized` e 409 `not_connected`
+> para `charger_offline`.
+
 ## 1. Deploy
 
 O deploy automático do ANTIGO está **quebrado** (GitHub Actions): o deploy é
@@ -89,10 +106,28 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST \
 
 ## 3. Fluxo E2E — start real
 
-1. No app / rota de start pós-pago, iniciar uma sessão em um carregador **conectado**
-   no NOVO.
-2. O NOVO envia `RemoteStartTransaction` (dono do socket OCPP) e, quando o
-   carregador responde `StartTransaction`, emite `session.started`.
+1. No app / rota de start pós-pago do ANTIGO, iniciar uma sessão em um
+   carregador **conectado** no NOVO.
+2. O ANTIGO resolve a rota do comando (`resolveCommandRoute`): sem socket local
+   nem owner distribuído, e estando o carregador conectado no NOVO, a rota é
+   `new_csms`. O start é **delegado** ao NOVO via
+   `POST {NEW_CSMS_BASE_URL}/integration/v1/sessions/start` (header
+   `x-integration-key`), com `integrationSessionId` derivado da `idempotencyKey`
+   (`is-<sha256>`); a resposta traz `commandRoute: 'new_csms'`.
+3. O NOVO envia `RemoteStartTransaction` (dono do socket OCPP) e, quando o
+   carregador responde `StartTransaction`, emite `session.started` com o
+   `ocppTransactionId` (autoridade de fio do NOVO, ADR-02).
+4. O ANTIGO, no handler F5, **cria a sessão de negócio** (o ANTIGO não recebe
+   mais `StartTransaction`): `sessions.transaction_id = ocppTransactionId`,
+   recuperando `userId`/`billingModel` do contexto do remoteStart pós-pago; em
+   seguida grava a correlação `state='started'`.
+
+Verificar a delegação (o start saiu do ANTIGO como comando ao NOVO):
+
+```bash
+pm2 logs csms --lines 60 | grep -i 'new_csms\|sessions/start'
+# esperado: registro de start delegado (commandRoute new_csms)
+```
 
 Verificar a correlação no Supabase do ANTIGO:
 
@@ -142,6 +177,8 @@ Resumo do pagamento: `billingModel=postpaid` e `status=succeeded`.
 
 ## 5. Critérios de aceite
 
+- [ ] O start do ANTIGO é **delegado** ao NOVO (`commandRoute='new_csms'`); o ANTIGO não envia `RemoteStartTransaction` diretamente.
+- [ ] A sessão de negócio (`sessions`) é **criada no `session.started`** com `transaction_id` = `ocpp_transaction_id` do NOVO.
 - [ ] `session.started` cria a correlação (`state='started'`).
 - [ ] `meter.sampled` popula `charge_meter_sample` no NOVO.
 - [ ] `session.stopped` encerra a sessão (`status='completed'`) e gera cobrança.
