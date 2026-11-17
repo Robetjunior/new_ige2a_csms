@@ -277,6 +277,29 @@ test('start com corpo invalido retorna 400 invalid_body', async () => {
   await app.close();
 });
 
+// Regressao: o ANTIGO envia `idTag = userId`, que e um UUID de 36 caracteres.
+// Com o limite antigo de 32 a rota devolvia 400 antes de gravar qualquer linha,
+// bloqueando todo start real da integracao (nenhum registro em inbox/sessao).
+test('start aceita idTag de UUID com 36 caracteres', async () => {
+  const repo = makeRepo({ claimResult: { outcome: 'owner' } });
+  const ws = makeWs({ connected: true });
+  const { app } = await buildApp({ repo, ws });
+
+  const userId = '3f9a1c2e-7b4d-4a51-9c8e-2d6f0b1a4c77';
+  const res = await app.inject({
+    method: 'POST',
+    url: '/integration/v1/sessions/start',
+    headers: authHeaders,
+    payload: { ...startPayload, idTag: userId },
+  });
+
+  assert.equal(userId.length, 36);
+  assert.equal(res.statusCode, 202);
+  assert.equal((res.json() as { ok: boolean }).ok, true);
+  assert.equal((ws.calls[0]?.payload as { idTag: string }).idTag, userId);
+  await app.close();
+});
+
 test('start sem integrationKey configurada retorna 503 integration_disabled', async () => {
   const { app } = await buildApp({ integrationKey: '', ws: makeWs() });
   const res = await app.inject({

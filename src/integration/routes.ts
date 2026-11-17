@@ -40,7 +40,10 @@ const startBodySchema = z.object({
   idempotencyKey: z.string().min(1).max(128),
   chargePointId: z.string().min(1).max(64),
   connectorId: z.number().int().min(0).max(64),
-  idTag: z.string().min(1).max(32),
+  // 64 e nao 32: o ANTIGO envia `idTag = userId` e o id de usuario do Supabase
+  // e um UUID de 36 caracteres. Com 32 a rota devolvia 400 `invalid_body` antes
+  // de gravar qualquer linha, bloqueando todo start real (secao 4.1).
+  idTag: z.string().min(1).max(64),
 });
 
 const stopBodySchema = z.object({
