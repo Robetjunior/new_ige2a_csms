@@ -13,11 +13,13 @@
  *   - nenhum caminho de erro lanca para o Fastify: cada falha vira o status
  *     HTTP adequado.
  */
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../config/env';
 import type { IntegrationInboxRepository } from './inboxRepository';
+import type { IntegrationOutboxRepository } from './outboxRepository';
+import type { IntegrationEvent } from './types';
 
 /** Superficie minima e publica do servidor OCPP consumida pelas rotas. */
 export interface IntegrationWsServer {
@@ -29,6 +31,9 @@ export interface IntegrationRoutesDeps {
   config: AppConfig;
   repository: IntegrationInboxRepository | null;
   wsServer: IntegrationWsServer;
+  /** Outbox de telemetria. Usado para emitir `session.stopped` quando uma
+   *  sessao em PENDING_ACK e cancelada via API (sem StartTransaction). */
+  outbox?: IntegrationOutboxRepository | null;
   log?: (msg: string, meta?: unknown) => void;
 }
 
@@ -212,7 +217,45 @@ export async function registerIntegrationRoutes(
       return;
     }
     if (session.ocpp_transaction_id == null) {
-      await reply.code(409).send({ error: 'not_started' });
+      // A sessao ainda nao recebeu o StartTransaction do carregador
+      // (estado PENDING_ACK). O usuario esta cancelando antes do inicio
+      // efetivo da carga. Marcamos como STOPPED sem enviar
+      // RemoteStopTransaction (que exigiria um transactionId) e emitimos
+      // session.stopped para o ANTIGO finalizar a sessao local (sem cobranca,
+      // pois nenhuma energia foi entregue).
+      const stoppedAt = new Date().toISOString();
+      await repository.upsertSession({
+        integrationSessionId,
+        idempotencyKey: session.idempotency_key,
+        chargePointId: session.charge_point_id,
+        connectorId: session.connector_id,
+        ocppTransactionId: null,
+        state: 'STOPPED',
+        idTag: session.id_tag,
+        startedAt: session.started_at,
+        stoppedAt,
+      });
+      if (deps.outbox) {
+        const event: IntegrationEvent = {
+          eventId: randomUUID(),
+          eventType: 'session.stopped',
+          integrationSessionId,
+          ocppTransactionId: null,
+          chargePointId: session.charge_point_id,
+          connectorId: session.connector_id,
+          occurredAt: stoppedAt,
+          data: { meterStop: null, reason: 'cancelled_before_start' },
+        };
+        try {
+          await deps.outbox.enqueue(event);
+        } catch (err) {
+          log?.('[integration] falha ao enfileirar session.stopped (cancelamento)', {
+            integrationSessionId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      await reply.code(202).send({ ok: true, integrationSessionId, status: 'cancelled' });
       return;
     }
 

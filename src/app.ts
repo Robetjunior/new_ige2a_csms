@@ -290,6 +290,7 @@ export async function createApp(config: AppConfig = loadConfig(), deps: AppDepen
     config,
     repository: integration.repository,
     wsServer: components.wsServer,
+    outbox: integration.outbox,
     log: (msg, meta) => fastify.log.info({ integration: true, meta }, msg),
   });
   // Central de Monitoramento (UI estatica) servida na raiz. `..` funciona tanto

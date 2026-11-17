@@ -75,20 +75,38 @@ function makeWs(overrides: { connected?: boolean; fail?: boolean } = {}): FakeWs
   };
 }
 
+interface FakeOutbox {
+  enqueued: unknown[];
+  enqueue(event: unknown): Promise<void>;
+}
+
+function makeOutbox(): FakeOutbox {
+  const enqueued: unknown[] = [];
+  return {
+    enqueued,
+    async enqueue(event) {
+      enqueued.push(event);
+    },
+  };
+}
+
 async function buildApp(options: {
   integrationKey?: string;
   repo?: FakeRepo | null;
   ws?: FakeWs;
-}): Promise<{ app: ReturnType<typeof Fastify>; repo: FakeRepo | null; ws: FakeWs }> {
+  outbox?: FakeOutbox;
+}): Promise<{ app: ReturnType<typeof Fastify>; repo: FakeRepo | null; ws: FakeWs; outbox: FakeOutbox | undefined }> {
   const app = Fastify();
   const repo = options.repo === undefined ? makeRepo() : options.repo;
   const ws = options.ws ?? makeWs();
+  const outbox = options.outbox;
   await registerIntegrationRoutes(app, {
     config: makeTestConfig({ integrationKey: options.integrationKey ?? INTEGRATION_KEY }),
     repository: repo as unknown as IntegrationInboxRepository | null,
     wsServer: ws,
+    outbox: outbox as never,
   });
-  return { app, repo, ws };
+  return { app, repo, ws, outbox };
 }
 
 const startPayload = {
@@ -331,7 +349,7 @@ test('stop com sessao inexistente retorna 404 not_found', async () => {
   await app.close();
 });
 
-test('stop com sessao sem transacao OCPP retorna 409 not_started', async () => {
+test('stop em PENDING_ACK sem transacao OCPP: 202 cancelled, STOPPED e session.stopped', async () => {
   const repo = makeRepo({
     session: {
       integration_session_id: 'S1',
@@ -346,7 +364,8 @@ test('stop com sessao sem transacao OCPP retorna 409 not_started', async () => {
     },
   });
   const ws = makeWs();
-  const { app } = await buildApp({ repo, ws });
+  const outbox = makeOutbox();
+  const { app } = await buildApp({ repo, ws, outbox });
 
   const res = await app.inject({
     method: 'POST',
@@ -355,9 +374,19 @@ test('stop com sessao sem transacao OCPP retorna 409 not_started', async () => {
     payload: { integrationSessionId: 'S1' },
   });
 
-  assert.equal(res.statusCode, 409);
-  assert.deepEqual(res.json(), { error: 'not_started' });
+  assert.equal(res.statusCode, 202);
+  assert.deepEqual(res.json(), { ok: true, integrationSessionId: 'S1', status: 'cancelled' });
+  // Nao envia RemoteStopTransaction, pois nao ha transactionId.
   assert.equal(ws.calls.length, 0);
+  // Sessao local e encerrada.
+  assert.equal(repo.upsertCalls.length, 1);
+  assert.equal(repo.upsertCalls[0]?.state, 'STOPPED');
+  assert.equal(repo.upsertCalls[0]?.ocppTransactionId, null);
+  // Evento emitido para o ANTIGO finalizar a sessao de negocio.
+  assert.equal(outbox.enqueued.length, 1);
+  const event = outbox.enqueued[0] as { eventType: string; data: { reason: string } };
+  assert.equal(event.eventType, 'session.stopped');
+  assert.equal(event.data.reason, 'cancelled_before_start');
   await app.close();
 });
 
