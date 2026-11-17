@@ -654,6 +654,22 @@ Escolha: serie dedicada (secao 5.3), consumida pelo ANTIGO. Consequencia: habili
 de potencia/SoC; adiciona escrita de alta frequencia (usar writer em lote, padrao ja
 existente).
 
+**ADR-04.1: Fonte de verdade da serie e projecao de leitura (decidido).** A fonte de
+verdade da serie temporal e o NOVO (`orchestrator.charge_meter_sample`, secao 5.3),
+alimentado por `fireMeterSampled`
+([telemetryProducer.ts](file:///Users/joseroberto/Documents/trae_projects/Work_HOME/IGE2A/repositorios/NEW_IGE2A_CSMS/src/integration/telemetryProducer.ts)).
+O ANTIGO NAO duplica a serie: mantem apenas uma **projecao de leitura** na tabela
+`meter_values`, gravada a partir de `meter.sampled` pelo handler de integracao
+([integrationSessionEventHandler.ts](file:///Users/joseroberto/Documents/trae_projects/Work_HOME/IGE2A/repositorios/IGE2A_CSMS/src/adapters/integrationSessionEventHandler.ts)),
+porque e essa tabela que `/v1/chargers/:id/active-session` e o WS do app
+(`/v1/ws/{chargeBoxId}`) leem. Regras da projecao: (a) `meter.sampled` e mapeado para
+`meter_values` pelo mesmo mapa measurand+unit->coluna do `OcppService` do ANTIGO;
+(b) guard de ordem temporal por transacao (amostra atrasada/duplicada nao regride a
+serie); (c) a projecao reemite `telemetry-updated` no `eventBus` do ANTIGO para o app.
+Consequencia: elimina-se a dupla dependencia (o ANTIGO deixa de esperar `MeterValues`
+no socket OCPP, que no modelo dual esta vazio); a retencao de longo prazo permanece no
+NOVO e `meter_values` fica como cache de leitura do app.
+
 **ADR-05: Modulo de integracao aditivo no NOVO, sem tocar o nucleo OCPP. [APROVADO]**
 Contexto: o pedido exige camada de integracao; o NOVO pode ser alterado desde que a
 comunicacao OCPP permaneca intacta. Alternativas: alterar o nucleo OCPP (descartada) x
@@ -736,8 +752,9 @@ fase e declarada VALIDADA sem execucao real; nenhuma e PUBLICADA sem deploy.
    dispensa exposicao publica; ainda assim, o modulo novo tera credencial propria
    (a rota `/api/*` existente e protegida por `CSMS_API_KEY`,
    [routes.ts](file:///Users/joseroberto/Documents/trae_projects/Work_HOME/IGE2A/repositorios/NEW_IGE2A_CSMS/src/http/routes.ts#L158-L167)).
-2. **Serie temporal.** Com o modo aditivo no NOVO habilitado, a serie pode residir no NOVO
-   (`charge_meter_sample`, secao 5.3) ou no ANTIGO. Confirmar esquema e retencao.
+2. **(RESOLVIDA) Serie temporal.** A serie reside no NOVO (`orchestrator.charge_meter_sample`,
+   secao 5.3) como fonte de verdade; o ANTIGO mantem apenas a projecao de leitura
+   `meter_values` para o app (ADR-04.1). Retencao de longo prazo no NOVO.
 3. **Firmware envia `SoC`?** Precisa de evidencia de campo; sem isso, SoC fica "nao
    disponivel" e nao deve ser estimado.
 4. **Valor monetario.** Confirmar que a UI do NOVO exibe o valor vindo do ANTIGO por leitura
