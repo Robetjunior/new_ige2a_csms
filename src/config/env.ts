@@ -57,6 +57,15 @@ export interface AppConfig {
     readonly pushCircuitFailureThreshold: number;
     /** F6: tempo (ms) com o circuito aberto antes de sondar o ANTIGO. */
     readonly pushCircuitOpenMs: number;
+    /**
+     * Uma sessao `PENDING_ACK` que nunca recebeu `StartTransaction` (start
+     * aceito pelo carregador mas a transacao nao iniciou) e cancelada apos este
+     * tempo (ms). Encerra a sessao local e emite `session.stopped`
+     * (`reason: start_timeout`). `0` desabilita o watcher.
+     */
+    readonly sessionStartTimeoutMs: number;
+    /** Periodo (ms) do sweep que cancela sessoes de start expiradas. */
+    readonly sessionTimeoutSweepIntervalMs: number;
   };
 
   readonly ocpp: {
@@ -133,6 +142,9 @@ export function loadConfig(): AppConfig {
       pushBackoffMaxMs: Math.max(1000, readNumber('INTEGRATION_PUSH_BACKOFF_MAX_MS', 300_000)),
       pushCircuitFailureThreshold: Math.max(1, readNumber('INTEGRATION_PUSH_CIRCUIT_FAILURE_THRESHOLD', 5)),
       pushCircuitOpenMs: Math.max(1000, readNumber('INTEGRATION_PUSH_CIRCUIT_OPEN_MS', 30_000)),
+      // 0 desabilita o watcher; default 120 s (janela folgada para firmwares lentos).
+      sessionStartTimeoutMs: Math.max(0, readNumber('INTEGRATION_SESSION_START_TIMEOUT_MS', 120_000)),
+      sessionTimeoutSweepIntervalMs: Math.max(5_000, readNumber('INTEGRATION_SESSION_TIMEOUT_SWEEP_INTERVAL_MS', 30_000)),
     }),
 
     ocpp: Object.freeze({

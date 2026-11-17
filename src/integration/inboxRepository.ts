@@ -300,6 +300,37 @@ export class IntegrationInboxRepository {
       return null;
     }
   }
+
+  /**
+   * Lista sessoes em `PENDING_ACK` criadas antes de `olderThanIso`. Consumida
+   * pelo watcher de timeout de start: um start aceito pelo carregador que nunca
+   * virou `StartTransaction` fica preso em `PENDING_ACK` e precisa ser
+   * cancelado. Nunca lanca; `[]` se indisponivel.
+   */
+  async listStalePendingAckSessions(olderThanIso: string, limit = 100): Promise<IntegrationSessionRow[]> {
+    try {
+      const { data, error } = await this.client
+        .schema(this.schema)
+        .from(TABLE_SESSION)
+        .select('*')
+        .eq('state', 'PENDING_ACK')
+        .lt('created_at', olderThanIso)
+        .order('created_at', { ascending: true })
+        .limit(Math.max(1, limit));
+      if (error) {
+        this.log(
+          `[integration] falha ao listar sessoes PENDING_ACK antigas: ${errorMessage(error)}`,
+        );
+        return [];
+      }
+      return (data ?? [])
+        .map((row) => toSessionRow(row as Record<string, unknown>))
+        .filter((row): row is IntegrationSessionRow => row !== null);
+    } catch (err) {
+      this.log('[integration] erro inesperado ao listar sessoes PENDING_ACK antigas', err);
+      return [];
+    }
+  }
 }
 
 function toSessionRow(row: Record<string, unknown>): IntegrationSessionRow | null {

@@ -27,6 +27,7 @@ import { MeterSampleRepository } from './meterSampleRepository';
 import { OutboxDispatcher } from './outboxDispatcher';
 import { TelemetryProducer, type TelemetryMessages } from './telemetryProducer';
 import { SessionCorrelator, type SessionCorrelatorChargers } from './sessionCorrelator';
+import { SessionStartTimeoutWatcher } from './sessionStartTimeoutWatcher';
 import { CircuitBreaker } from './circuitBreaker';
 
 export interface IntegrationModuleDeps {
@@ -55,6 +56,8 @@ export interface IntegrationModule {
   readonly samples: MeterSampleRepository | null;
   /** Dispatcher de push (F3). Nulo quando o push nao esta configurado. */
   readonly dispatcher: OutboxDispatcher | null;
+  /** Watcher de timeout de start: cancela sessoes `PENDING_ACK` sem `StartTransaction`. */
+  readonly startTimeoutWatcher: SessionStartTimeoutWatcher | null;
   /** Circuit breaker do push (F6). Nulo quando o push nao esta configurado. */
   readonly breaker: CircuitBreaker | null;
   /** Indica se o push para o ANTIGO esta ativo. */
@@ -73,6 +76,7 @@ function createDisabled(): IntegrationModule {
     producer: null,
     samples: null,
     dispatcher: null,
+    startTimeoutWatcher: null,
     breaker: null,
     pushEnabled: false,
     start() {
@@ -164,6 +168,17 @@ export function createIntegrationModule(deps: IntegrationModuleDeps): Integratio
     log('[integration] push habilitado sem targetUrl/hmacSecret; telemetria fica apenas no outbox');
   }
 
+  // Endurecimento do start: cancela sessoes `PENDING_ACK` que nunca receberam
+  // `StartTransaction` (start aceito pelo carregador mas a transacao nao
+  // iniciou). `sessionStartTimeoutMs <= 0` desabilita.
+  const startTimeoutWatcher = new SessionStartTimeoutWatcher(
+    { repository, outbox, log },
+    {
+      timeoutMs: integration.sessionStartTimeoutMs,
+      intervalMs: integration.sessionTimeoutSweepIntervalMs,
+    },
+  );
+
   return {
     enabled: true,
     repository,
@@ -172,16 +187,19 @@ export function createIntegrationModule(deps: IntegrationModuleDeps): Integratio
     producer,
     samples,
     dispatcher,
+    startTimeoutWatcher,
     breaker,
     pushEnabled,
     start(): void {
       correlator.start();
       producer.start();
+      startTimeoutWatcher.start();
       dispatcher?.start();
       log(`[integration] modulo iniciado (push=${pushEnabled ? 'on' : 'off'})`);
     },
     async stop(): Promise<void> {
       dispatcher?.stop();
+      startTimeoutWatcher.stop();
       producer.stop();
       correlator.stop();
       // F4: drena a fila da serie temporal antes de encerrar.
@@ -198,6 +216,7 @@ export { OutboxDispatcher } from './outboxDispatcher';
 export { CircuitBreaker } from './circuitBreaker';
 export { TelemetryProducer } from './telemetryProducer';
 export { SessionCorrelator } from './sessionCorrelator';
+export { SessionStartTimeoutWatcher } from './sessionStartTimeoutWatcher';
 export {
   computeDurationSeconds,
   computeEnergyWh,
@@ -224,6 +243,12 @@ export type {
 } from './telemetryProducer';
 export type { IntegrationInboxRepositoryOptions, IntegrationSessionUpsert } from './inboxRepository';
 export type { SessionCorrelatorChargers, SessionCorrelatorDeps, SessionCorrelatorMessage, SessionCorrelatorMessages, SessionCorrelatorRepository } from './sessionCorrelator';
+export type {
+  SessionStartTimeoutOutbox,
+  SessionStartTimeoutRepository,
+  SessionStartTimeoutWatcherDeps,
+  SessionStartTimeoutWatcherOptions,
+} from './sessionStartTimeoutWatcher';
 export type {
   InboxClaimInput,
   InboxClaimResult,

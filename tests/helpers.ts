@@ -23,6 +23,9 @@ export function makeTestConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       pushBackoffMaxMs: 300_000,
       pushCircuitFailureThreshold: 5,
       pushCircuitOpenMs: 30_000,
+      // Desabilitado nos testes: evita sweeps de Supabase e side effects.
+      sessionStartTimeoutMs: 0,
+      sessionTimeoutSweepIntervalMs: 30_000,
     }),
     ocpp: Object.freeze({
       lenientProtocolFallback: true,
